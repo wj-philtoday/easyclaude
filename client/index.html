@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>easyclaude</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="ec-body">
+<div id="ec-shell">
+
+  <!-- 사이드 탭 (wide) / 상단 햄버거 (narrow) -->
+  <nav id="ec-nav" class="ec-nav">
+    <div class="ec-nav-header">
+      <span class="ec-logo">easyclaude</span>
+      <button id="ec-ham" class="ec-icon-btn">☰</button>
+    </div>
+    <div id="ec-tabs" class="ec-tabs"></div>
+    <div class="ec-nav-footer">
+      <button id="ec-settings-btn" class="ec-icon-btn ec-full">⚙ 설정</button>
+    </div>
+  </nav>
+
+  <!-- 메인 -->
+  <main id="ec-main" class="ec-main">
+    <!-- 뷰 토글 바 -->
+    <div id="ec-viewbar" class="ec-viewbar">
+      <button id="ec-view-raw" class="ec-view-btn active">RAW</button>
+      <button id="ec-view-parsed" class="ec-view-btn">PARSED</button>
+      <button id="ec-pause-btn" class="ec-view-btn" style="margin-left:4px">⏸</button>
+      <button id="ec-capture-btn" class="ec-view-btn" title="tmux 전체 스크롤백 캡처">↯</button>
+      <span id="ec-parse-status" class="ec-parse-status"></span>
+    </div>
+    <!-- 터미널 출력 (RAW) -->
+    <div id="ec-terms" class="ec-terms"></div>
+    <!-- 파싱된 뷰 (PARSED) -->
+    <div id="ec-parsed-view" class="ec-parsed-view ec-hidden"></div>
+
+    <!-- 하단 컨트롤 -->
+    <div id="ec-bottom" class="ec-bottom">
+      <!-- 키 바 -->
+      <div id="ec-keybar" class="ec-keybar">
+        <button data-seq="\x15" title="Ctrl+U (줄 지우기)" style="color:#f38ba8">C-u</button>
+        <button data-seq="\x03" title="Ctrl+C">C-c</button>
+        <button data-seq="\x04" title="Ctrl+D">C-d</button>
+        <button data-seq="\x1a" title="Ctrl+Z">C-z</button>
+        <button data-seq="\x1b" title="Esc">Esc</button>
+        <button data-seq="\t"   title="Tab">Tab</button>
+        <button data-seq="\x1b[A" title="↑">↑</button>
+        <button data-seq="\x1b[B" title="↓">↓</button>
+        <button data-seq="\x1b[C" title="→">→</button>
+        <button data-seq="\x1b[D" title="←">←</button>
+        <button id="ec-mode-btn" class="ec-mode-cmd">CMD</button>
+      </div>
+      <!-- 입력창 -->
+      <div id="ec-inputbar" class="ec-inputbar">
+        <div id="ec-autocomplete" class="ec-autocomplete ec-hidden"></div>
+        <input id="ec-input" type="text" autocomplete="off" autocorrect="off"
+               autocapitalize="none" spellcheck="false" placeholder="메시지 입력…">
+        <button id="ec-send-btn" title="전송">↵</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- 설정 패널 -->
+<div id="ec-settings" class="ec-settings ec-hidden">
+  <div class="ec-settings-panel">
+    <div class="ec-settings-head">
+      <h3>설정</h3>
+      <button id="ec-settings-close" class="ec-icon-btn">✕</button>
+    </div>
+    <div class="ec-settings-body">
+      <label>폰트 크기
+        <input id="cfg-fontsize" type="range" min="8" max="24" value="13">
+        <span id="cfg-fontsize-val">13</span>px
+      </label>
+      <label>테마
+        <select id="cfg-theme">
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+          <option value="solarized">Solarized</option>
+          <option value="monokai">Monokai</option>
+        </select>
+      </label>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+<script src="app.js?v=1778423030"></script>
+</body>
+</html>

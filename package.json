@@ -1,0 +1,16 @@
+{
+  "name": "easyclaude",
+  "version": "0.1.0",
+  "description": "A web harness overlay for Claude Code — ANSI-native, buffer-parsed UI",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "keywords": ["claude", "claude-code", "terminal", "xterm", "websocket"],
+  "license": "MIT",
+  "dependencies": {
+    "node-pty": "*",
+    "ws": "*"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "port": 7860,
+  "host": "127.0.0.1",
+  "sessions": [
+    { "id": "arche",  "label": "Arche",  "cmd": "tmux", "args": ["attach-session", "-t", "view-arche"],  "cwd": "/home/team-pm/.arche",  "meta": { "agent": "arche"  } },
+    { "id": "gnosi",  "label": "Gnosi",  "cmd": "tmux", "args": ["attach-session", "-t", "view-gnosi"],  "cwd": "/home/team-pm/.gnosi",  "meta": { "agent": "gnosi"  } },
+    { "id": "ethos",  "label": "Ethos",  "cmd": "tmux", "args": ["attach-session", "-t", "view-ethos"],  "cwd": "/home/team-pm/.ethos",  "meta": { "agent": "ethos"  } },
+    { "id": "nomon",  "label": "Nomon",  "cmd": "tmux", "args": ["attach-session", "-t", "view-nomon"],  "cwd": "/home/team-pm/.nomon",  "meta": { "agent": "nomon"  } },
+    { "id": "themis", "label": "Themis", "cmd": "tmux", "args": ["attach-session", "-t", "view-themis"], "cwd": "/home/team-pm/.themis", "meta": { "agent": "themis" } }
+  ]
+}
