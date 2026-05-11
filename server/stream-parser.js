@@ -111,6 +111,13 @@ class StreamParser {
       case 'usage_alert':
         // 세션 lifecycle 이벤트 — 흡수
         return;
+      case 'queue-operation':
+      case 'last-prompt':
+      case 'attachment':
+      case 'todo-list':
+      case 'model-change':
+        // claude jsonl 부수 메타 — turn 미생성 (필요 시 session에 흡수)
+        return;
       default:
         // 알려지지 않은 type — 'meta' 로 분류 (대화창 기본 숨김, 디버그 토글로 노출)
         this._addTurn({ type: 'meta', body: JSON.stringify(evt), raw: true, eventType: evt.type });

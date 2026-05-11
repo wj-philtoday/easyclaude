@@ -709,6 +709,12 @@ function activate(sessionId) {
   if (ch?.pendingDialog) showDialog(ch);
   else hideDialog();
   requestAnimationFrame(() => $input.focus());
+  // history 자동 로드 (이 세션에서 아직 한 번도 안 받았으면)
+  if (ch && ch.histStart === -1) {
+    loadMoreHistory(ch).then(() => {
+      if (ch.sessionId === activeSid) $parsed.scrollTop = $parsed.scrollHeight;
+    });
+  }
 }
 
 function openSession(sessionId) {
@@ -746,8 +752,11 @@ async function loadMoreHistory(ch) {
   try {
     const params = new URLSearchParams({ limit: '100' });
     if (ch.histStart > 0) params.set('before', String(ch.histStart));
-    const r = await fetch(apiBase() + `api/sessions/${encodeURIComponent(ch.sessionId)}/history-turns?` + params.toString());
+    const url = apiBase() + `api/sessions/${encodeURIComponent(ch.sessionId)}/history-turns?` + params.toString();
+    console.log('[ec] history fetch', ch.sessionId, 'histStart=', ch.histStart, 'url=', url);
+    const r = await fetch(url);
     const data = await r.json();
+    console.log('[ec] history resp', ch.sessionId, 'ok=', data?.ok, 'total=', data?.total, 'start=', data?.start, 'end=', data?.end, 'turns=', (data?.turns||[]).length, 'hint=', data?.hint);
     if (!data || !data.ok) return;
     ch.histTotal = data.total;
     ch.histStart = data.start;
