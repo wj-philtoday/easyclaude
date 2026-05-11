@@ -11,6 +11,85 @@ const { randomUUID } = require('crypto');
 const { StreamParser } = require('./stream-parser');
 const { startWatcher: startInboxWatcher, eventToChannelText, detectAgentIdentity } = require('./inbox-watcher');
 
+// ── HOME overlay (ec가 spawn할 claude의 ~/.claude/* 격리) ───────────────────
+// cfg.overlay.enabled === true 면 활성. 기본 off (마이그레이션 안전).
+// overlay HOME 경로: $XDG_DATA_HOME/easyclaude/overlay/
+//   .claude/
+//     settings.json   ← /opt/easyclaude/data/settings.json 복사 (없을 때만)
+//     CLAUDE.md       ← /opt/easyclaude/data/CLAUDE.md base + cfg.overlay.claudeMd 합성
+//     skills/         ← /opt/easyclaude/data/skills/* 심볼릭 (디렉토리 단위)
+//     credentials.json ← 자동 생성 안 함. ec 내에서 첫 `/login`으로 채워짐.
+// project-level (<cwd>/.claude/*)은 claude code가 cwd 자동 탐색 — 따로 안 건드림.
+function ensureOverlayHome(realHome) {
+  const xdgData = process.env.XDG_DATA_HOME || path.join(realHome, '.local', 'share');
+  const ovDir = path.join(xdgData, 'easyclaude', 'overlay');
+  const ovClaude = path.join(ovDir, '.claude');
+  try { fs.mkdirSync(ovClaude, { recursive: true }); } catch {}
+
+  const pkgRoot = path.join(__dirname, '..');
+  const pkgData = path.join(pkgRoot, 'data');
+  const pkgSettings = path.join(pkgData, 'settings.json');
+  const pkgCMd     = path.join(pkgData, 'CLAUDE.md');
+  const pkgSkills  = path.join(pkgData, 'skills');
+
+  // 1) settings.json — 없으면 패키지 데이터 복사 (있으면 사용자의 ec 편집 보존)
+  const ovSettings = path.join(ovClaude, 'settings.json');
+  if (!fs.existsSync(ovSettings) && fs.existsSync(pkgSettings)) {
+    try { fs.copyFileSync(pkgSettings, ovSettings); } catch {}
+  }
+
+  // 2) CLAUDE.md — base + @-refs (cfg.overlay.claudeMd.refs.user 등)
+  const ovCfg = (cfg && cfg.overlay) || {};
+  const cmdCfg = (ovCfg.claudeMd) || {};
+  const refs = cmdCfg.refs || {};
+  let base = cmdCfg.base;
+  if (!base && fs.existsSync(pkgCMd)) base = fs.readFileSync(pkgCMd, 'utf8');
+  if (!base) base = '# easyclaude default context\n';
+  const lines = [base.replace(/\n+$/, '')];
+  if (refs.user)    lines.push('', `@${realHome}/.claude/CLAUDE.md`);
+  // project/cwd CLAUDE.md는 claude가 cwd 기반으로 자동 탐색 — @ 참조 불필요.
+  // 단 cfg.overlay.claudeMd.extraRefs (절대 경로 배열) 지원
+  if (Array.isArray(cmdCfg.extraRefs)) {
+    for (const r of cmdCfg.extraRefs) lines.push('', `@${r}`);
+  }
+  try { fs.writeFileSync(path.join(ovClaude, 'CLAUDE.md'), lines.join('\n') + '\n'); } catch {}
+
+  // 3) skills — 패키지 번들을 항목 단위로 심볼릭
+  const ovSkills = path.join(ovClaude, 'skills');
+  try { fs.mkdirSync(ovSkills, { recursive: true }); } catch {}
+  if (fs.existsSync(pkgSkills)) {
+    let entries = [];
+    try { entries = fs.readdirSync(pkgSkills); } catch {}
+    for (const name of entries) {
+      const src = path.join(pkgSkills, name);
+      const dst = path.join(ovSkills, name);
+      try {
+        const st = fs.lstatSync(dst);
+        if (st.isSymbolicLink()) continue; // 이미 있음
+        // 다른 파일/디렉토리가 있으면 건드리지 않음
+        continue;
+      } catch {
+        try { fs.symlinkSync(src, dst, 'dir'); } catch {}
+      }
+    }
+  }
+
+  return ovDir;
+}
+
+// ── 응답 포맷 강제 (--append-system-prompt) ────────────────────────────────
+// cfg.formatting: { markdown:bool, mathJax:bool, extraPrompt:string }
+// markdown/mathJax 켜면 자동으로 지시 문장 합성. extraPrompt는 자유 추가.
+function buildFormattingPrompt() {
+  const fcfg = (typeof cfg !== 'undefined' && cfg) ? cfg.formatting : null;
+  if (!fcfg) return null;
+  const parts = [];
+  if (fcfg.markdown) parts.push('모든 응답은 Markdown 형식. 헤딩(##/###), 굵게(**), 인라인 코드(`), 코드블록(```), 리스트, 표 적극 활용.');
+  if (fcfg.mathJax)  parts.push('수학 기호는 MathJax 형식: 인라인 $...$, 디스플레이 $$...$$. \\frac, \\sum, \\int 등 LaTeX 명령어 자유 사용.');
+  if (typeof fcfg.extraPrompt === 'string' && fcfg.extraPrompt.trim()) parts.push(fcfg.extraPrompt.trim());
+  return parts.length ? parts.join(' ') : null;
+}
+
 // ── claude-code 환경변수 자동 주입 (토글 가능) ───────────────────────────────
 // 기본값을 spawn 시 claude 프로세스 env에 주입한다.
 // 비활성화: cfg.claudeEnv === false
@@ -884,6 +963,12 @@ function buildSpawnArgs(sess) {
     };
   }
 
+  // --append-system-prompt 자동 주입 (cfg.formatting)
+  const fmtPrompt = buildFormattingPrompt();
+  if (fmtPrompt && !args.includes('--append-system-prompt')) {
+    args.push('--append-system-prompt', fmtPrompt);
+  }
+
   const saved = sessionState[sess.id];
   const existingId = saved?.claudeId;
   if (existingId) {
@@ -981,7 +1066,18 @@ function spawnSession(sess) {
     ...defaultClaudeEnv(),
     ...(injectedEnv || {}),
   };
-  if (sess.home) childEnv.HOME = sess.home;
+  // sess.home 명시 override가 최우선. 없으면 cfg.overlay.enabled에 따라 overlay HOME.
+  if (sess.home) {
+    childEnv.HOME = sess.home;
+  } else if (cfg && cfg.overlay && cfg.overlay.enabled === true) {
+    try {
+      const ovHome = ensureOverlayHome(process.env.HOME);
+      childEnv.HOME = ovHome;
+      console.log(`[easyclaude] overlay HOME for ${sess.id}: ${ovHome}`);
+    } catch (e) {
+      console.error(`[easyclaude] overlay setup fail: ${e.message}`);
+    }
+  }
 
   const proc = spawn('claude', args, {
     cwd: sess.cwd,
