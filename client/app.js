@@ -183,21 +183,67 @@ let activeSid = null;
 let nextClientId = 1;
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
+let outboundQueue = [];          // ws 닫혀 있을 때 모았다가 reconnect 후 flush
+let lastActiveSid = null;        // reconnect 후 자동 re-open할 세션
+let reconnectAttempts = 0;
+let reconnectTimer = null;
+
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const base  = location.pathname.replace(/[^/]*$/, '') || '/';
   ws = new WebSocket(`${proto}://${location.host}${base}`);
   ws.addEventListener('open', () => {
     setStatus('connected', 'ok');
+    reconnectAttempts = 0;
     channels.clear();
     activeSid = null;
     sendWs({ op: 'list' });
+    // outbound queue flush
+    if (outboundQueue.length) {
+      const drained = outboundQueue.slice();
+      outboundQueue = [];
+      for (const obj of drained) {
+        try { ws.send(JSON.stringify(obj)); }
+        catch (e) { outboundQueue.push(obj); break; }
+      }
+    }
+    // 이전에 활성화돼 있던 세션 자동 re-open (sessions 리스트 도착 후 처리)
+    pendingReopenSid = lastActiveSid;
   });
   ws.addEventListener('message', e => onMsg(JSON.parse(e.data)));
-  ws.addEventListener('close', () => { setStatus('disconnected', 'err'); setTimeout(connect, 2000); });
+  ws.addEventListener('close', () => {
+    setStatus(outboundQueue.length ? `disconnected (queued ${outboundQueue.length})` : 'disconnected', 'err');
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectAttempts++;
+    // 지수 backoff: 0.5s → 1s → 2s → ... 최대 15s
+    const delay = Math.min(500 * Math.pow(1.7, reconnectAttempts - 1), 15000);
+    reconnectTimer = setTimeout(connect, delay);
+  });
   ws.addEventListener('error', () => {});
+  // 탭이 보이게 되면 즉시 재연결 시도 (브라우저가 백그라운드에서 ws를 끊은 경우 빠른 복구)
+  if (!window.__ec_visibility_hooked__) {
+    window.__ec_visibility_hooked__ = true;
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && (!ws || ws.readyState !== WebSocket.OPEN)) {
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        connect();
+      }
+    });
+  }
 }
-function sendWs(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
+let pendingReopenSid = null;
+
+function sendWs(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { ws.send(JSON.stringify(obj)); return true; }
+    catch (e) { outboundQueue.push(obj); }
+  } else {
+    // 연결 안 됨 — queue. reconnect 후 flush.
+    outboundQueue.push(obj);
+    setStatus(`reconnecting (queued ${outboundQueue.length})`, 'warn');
+  }
+  return false;
+}
 
 function setStatus(text, kind) {
   $status.textContent = text;
@@ -213,6 +259,14 @@ function onMsg(msg) {
       if (!ecSessions.some(s => s.id === sid)) channels.delete(sid);
     }
     renderTabs();
+    // reconnect 후 이전 활성 세션 자동 복귀
+    if (pendingReopenSid && ecSessions.some(s => s.id === pendingReopenSid)) {
+      const sidToReopen = pendingReopenSid;
+      pendingReopenSid = null;
+      if (!channels.has(sidToReopen)) openSession(sidToReopen);
+      // openSession이 즉시 활성화 처리하지만, 만약 안 되면 명시적 activate
+      setTimeout(() => { if (channels.has(sidToReopen)) activate(sidToReopen); }, 100);
+    }
     return;
   }
   if (op === 'session_created') {
@@ -509,6 +563,7 @@ function refreshTabState() {
 function activate(sessionId) {
   if (!channels.has(sessionId)) return;
   activeSid = sessionId;
+  lastActiveSid = sessionId;     // reconnect 후 자동 복귀용
   const ch = channels.get(sessionId);
   if ($activeLabel) $activeLabel.textContent = ch?.label || '';
   refreshTabState();
@@ -623,6 +678,18 @@ function sendInput() {
   if (!val || !val.trim()) return;
   const ch = activeChannel();
   if (!ch) return;
+  // ec-handled 슬래시 인터셉트 (claude로 보내지 않음)
+  const slashM = val.trim().match(/^(\/\w+)\b/);
+  if (slashM) {
+    const def = SLASH_CMDS.find(c => c.cmd === slashM[1]);
+    if (def && def.kind === 'ec') {
+      runEcSlash(def.cmd, ch);
+      $input.value = '';
+      autosize();
+      hideAc();
+      return;
+    }
+  }
   sendWs({ op:'input', id: ch.id, data: val });
   // optimistic 풍선 — echo 도착 전 즉시 표시
   ch.pendingInputs = ch.pendingInputs || [];
@@ -815,15 +882,65 @@ $dialogCancel.addEventListener('click', () => {
 $dialogClose.addEventListener('click', () => $dialogCancel.click());
 
 // ── Autocomplete (슬래시 커맨드) ──────────────────────────────────────────────
-// stream-json 모드에서는 슬래시 커맨드가 대부분 비활성. 일반적인 텍스트로 전달됨.
-// /clear, /compact 등 일부만 실제 효과. 일단 보존.
+// stream-json/-p 모드에서는 TUI 슬래시 대부분 미지원. 두 갈래로 분리:
+//   kind:'claude' — 실제로 claude에게 전송되어 동작하는 것
+//   kind:'ec'     — ec 자체 API(/api/slash/*)로 인터셉트, 결과를 모달에 표시
 const SLASH_CMDS = [
-  { cmd: '/clear',    desc: '대화 초기화' },
-  { cmd: '/compact',  desc: '대화 압축' },
-  { cmd: '/model',    desc: '모델 변경' },
-  { cmd: '/agents',   desc: '에이전트 관리' },
-  { cmd: '/mcp',      desc: 'MCP 서버 관리' },
+  // claude-native (stream-json 모드에서도 동작)
+  { cmd: '/clear',    desc: '대화 초기화',                   kind: 'claude' },
+  { cmd: '/compact',  desc: '대화 압축',                     kind: 'claude' },
+  // ec-handled (API 호출 + 모달 표시)
+  { cmd: '/status',   desc: '세션 상태 (model/cwd/tools/mcp)', kind: 'ec' },
+  { cmd: '/usage',    desc: '토큰 사용량 + 비용',              kind: 'ec' },
+  { cmd: '/context',  desc: '컨텍스트 윈도우',                kind: 'ec' },
+  { cmd: '/stats',    desc: '~/.claude/stats-cache 누적',     kind: 'ec' },
+  { cmd: '/doctor',   desc: '진단 (claude version/auth/mcp)', kind: 'ec' },
+  { cmd: '/hooks',    desc: 'settings.json hooks 섹션',       kind: 'ec' },
+  { cmd: '/agents',   desc: '에이전트 목록 (filesystem)',     kind: 'ec' },
+  { cmd: '/tasks',    desc: '태스크 디렉토리',                kind: 'ec' },
+  { cmd: '/config',   desc: '설정 패널 열기',                 kind: 'ec' },
 ];
+
+// ec-handled 슬래시 인터셉트 — claude로 보내지 않고 ec API 호출
+async function runEcSlash(cmd, ch) {
+  const name = cmd.replace(/^\//, '');
+  if (name === 'config') {
+    // 설정 패널 열기 (이미 존재하는 settings 모달)
+    document.getElementById('ec-settings-btn')?.click();
+    return;
+  }
+  const sid = ch && ch.sessionId ? ch.sessionId : '';
+  try {
+    const r = await fetch(apiBase() + `api/slash/${name}?sid=${encodeURIComponent(sid)}`);
+    const data = await r.json();
+    showSlashResult(cmd, data);
+  } catch (e) {
+    showSlashResult(cmd, { error: e.message });
+  }
+}
+
+function showSlashResult(cmd, data) {
+  let el = document.getElementById('ec-slash-modal');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'ec-slash-modal';
+    el.className = 'ec-dialog ec-hidden';
+    el.innerHTML = `
+      <div class="ec-dialog-box" style="max-width:720px;width:90vw">
+        <div class="ec-dialog-head">
+          <h3 id="ec-slash-title" style="margin:0"></h3>
+          <button id="ec-slash-close" class="ec-icon-btn">✕</button>
+        </div>
+        <pre id="ec-slash-body" style="overflow:auto;max-height:60vh;font-size:12px;background:var(--ec-bg-deep,#f5f1ec);padding:12px;border-radius:8px;margin:0;white-space:pre-wrap;word-break:break-word"></pre>
+      </div>`;
+    document.body.appendChild(el);
+    el.querySelector('#ec-slash-close').addEventListener('click', () => el.classList.add('ec-hidden'));
+    el.addEventListener('click', e => { if (e.target === el) el.classList.add('ec-hidden'); });
+  }
+  document.getElementById('ec-slash-title').textContent = cmd;
+  document.getElementById('ec-slash-body').textContent = JSON.stringify(data, null, 2);
+  el.classList.remove('ec-hidden');
+}
 let acIdx = -1;
 function updateAc() {
   const v = $input.value;

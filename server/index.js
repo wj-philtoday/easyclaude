@@ -577,20 +577,42 @@ const server = http.createServer((req, res) => {
     catch { return res.end(JSON.stringify({ error: result.stderr || 'parse fail', raw: result.stdout })); }
   }
 
-  // /api/claude-settings?home=...  GET: 읽기 / PUT: body 로 저장
+  // /api/claude-settings?home=...[&force=1]  GET: 읽기 / PUT: body 로 저장
+  //   force=1: 권한 부족 시 sudo로 강제 read/write (sudoers에 tee/cat 허용 필요)
   if (req.url.startsWith('/api/claude-settings')) {
     const u = new URL(req.url, 'http://x');
     const home = u.searchParams.get('home') || process.env.HOME;
+    const force = u.searchParams.get('force') === '1';
     const settingsPath = path.join(home, '.claude', 'settings.json');
+    const { spawnSync } = require('child_process');
+    const sudoCat = (p) => {
+      const r = spawnSync('sudo', ['-n', 'cat', p], { timeout: 5000, encoding: 'utf8' });
+      return r.status === 0 ? r.stdout : null;
+    };
+    const sudoWrite = (p, content) => {
+      const r = spawnSync('sudo', ['-n', 'tee', p], { input: content, timeout: 5000, encoding: 'utf8' });
+      return r.status === 0;
+    };
     if (req.method === 'GET') {
+      let txt = null, mode = 'normal';
       try {
-        const txt = fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath, 'utf8') : '{}';
-        res.writeHead(200, {'Content-Type':'application/json'});
-        return res.end(JSON.stringify({ home, path: settingsPath, content: txt }));
+        if (fs.existsSync(settingsPath)) txt = fs.readFileSync(settingsPath, 'utf8');
+        else txt = '{}';
       } catch (e) {
-        res.writeHead(500, {'Content-Type':'application/json'});
-        return res.end(JSON.stringify({ error: e.message }));
+        if (force || (e.code === 'EACCES' || e.code === 'EPERM')) {
+          const sudoTxt = sudoCat(settingsPath);
+          if (sudoTxt !== null) { txt = sudoTxt; mode = 'sudo'; }
+          else {
+            res.writeHead(500, {'Content-Type':'application/json'});
+            return res.end(JSON.stringify({ error: e.message, sudo: 'failed (sudoers cat 미허용?)' }));
+          }
+        } else {
+          res.writeHead(500, {'Content-Type':'application/json'});
+          return res.end(JSON.stringify({ error: e.message }));
+        }
       }
+      res.writeHead(200, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ home, path: settingsPath, content: txt, mode }));
     }
     if (req.method === 'PUT') {
       return readJsonBody(req, (err, body) => {
@@ -600,22 +622,87 @@ const server = http.createServer((req, res) => {
           res.writeHead(400, {'Content-Type':'application/json'});
           return res.end(JSON.stringify({ error: 'content (string) required' }));
         }
-        // JSON 유효성 검사
         try { JSON.parse(content); }
         catch (e) {
           res.writeHead(400, {'Content-Type':'application/json'});
           return res.end(JSON.stringify({ error: 'invalid JSON: ' + e.message }));
         }
+        let mode = 'normal';
         try {
           ensureDir(path.dirname(settingsPath));
           fs.writeFileSync(settingsPath, content, { mode: 0o600 });
-          res.writeHead(200, {'Content-Type':'application/json'});
-          return res.end(JSON.stringify({ ok: true, path: settingsPath }));
         } catch (e) {
-          res.writeHead(500, {'Content-Type':'application/json'});
-          return res.end(JSON.stringify({ error: e.message }));
+          if (force || e.code === 'EACCES' || e.code === 'EPERM') {
+            if (sudoWrite(settingsPath, content)) mode = 'sudo';
+            else {
+              res.writeHead(500, {'Content-Type':'application/json'});
+              return res.end(JSON.stringify({ error: e.message, sudo: 'failed (sudoers tee 미허용?)' }));
+            }
+          } else {
+            res.writeHead(500, {'Content-Type':'application/json'});
+            return res.end(JSON.stringify({ error: e.message }));
+          }
         }
+        res.writeHead(200, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ ok: true, path: settingsPath, mode }));
       });
+    }
+  }
+
+  // /api/sessions/<sid>/jsonl?offset=N&limit=M — 페이지 단위 jsonl 라인 + 총 라인 수
+  // (프론트 무한 스크롤 용. offset/limit 미지정 시 default offset=0, limit=500)
+  const jsonlPageMatch = req.url.match(/^\/api\/sessions\/([^/]+)\/jsonl(?:\?(.*))?$/);
+  if (jsonlPageMatch && !req.url.includes('jsonl-path')) {
+    const sid = decodeURIComponent(jsonlPageMatch[1]);
+    const qs = new URLSearchParams(jsonlPageMatch[2] || '');
+    const offset = Math.max(0, parseInt(qs.get('offset') || '0', 10) || 0);
+    const limit  = Math.min(2000, Math.max(1, parseInt(qs.get('limit') || '500', 10) || 500));
+    const parse  = qs.get('parse') !== '0'; // default: parse each line
+    const claudeId = sessionState[sid]?.claudeId;
+    if (!claudeId) {
+      res.writeHead(404, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ error: 'session not found or no claudeId' }));
+    }
+    // jsonl path 찾기 (jsonl-path와 동일 로직)
+    const sess = findSession(sid);
+    const homes = [sess?.home, process.env.HOME].filter(Boolean);
+    let jsonlPath = null;
+    for (const h of homes) {
+      const projectsDir = path.join(h, '.claude', 'projects');
+      if (!fs.existsSync(projectsDir)) continue;
+      try {
+        for (const d of fs.readdirSync(projectsDir)) {
+          const p = path.join(projectsDir, d, claudeId + '.jsonl');
+          if (fs.existsSync(p)) { jsonlPath = p; break; }
+        }
+      } catch {}
+      if (jsonlPath) break;
+    }
+    if (!jsonlPath) {
+      res.writeHead(404, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ error: 'jsonl not found', claudeId }));
+    }
+    try {
+      const raw = fs.readFileSync(jsonlPath, 'utf8');
+      const allLines = raw.split('\n').filter(l => l.length > 0);
+      const total = allLines.length;
+      const slice = allLines.slice(offset, offset + limit);
+      const entries = parse
+        ? slice.map(l => { try { return JSON.parse(l); } catch { return { _parseError: true, raw: l.slice(0, 200) }; } })
+        : slice;
+      res.writeHead(200, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({
+        ok: true,
+        total,
+        offset,
+        limit,
+        returned: slice.length,
+        path: jsonlPath,
+        entries,
+      }));
+    } catch (e) {
+      res.writeHead(500, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ error: e.message }));
     }
   }
 
@@ -1012,7 +1099,22 @@ function sendToolResult(ch, tool_use_id, content, isError) {
 // ── WebSocket ────────────────────────────────────────────────────────────────
 const wss = new WebSocketServer({ server });
 
+// ── WS heartbeat: 30s마다 ping, 다음 주기 전까지 pong 없으면 terminate ────
+const WS_HEARTBEAT_INTERVAL_MS = 30000;
+setInterval(() => {
+  wss.clients.forEach(ws => {
+    if (ws.isAlive === false) {
+      try { ws.terminate(); } catch {}
+      return;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch {}
+  });
+}, WS_HEARTBEAT_INTERVAL_MS);
+
 wss.on('connection', ws => {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
   const wsChannels = new Map(); // clientId → { sessionId }
   const send = obj => ws.readyState === ws.OPEN && ws.send(JSON.stringify(obj));
 
