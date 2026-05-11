@@ -11,6 +11,9 @@ const { randomUUID } = require('crypto');
 const { StreamParser } = require('./stream-parser');
 const { startWatcher: startInboxWatcher, eventToChannelText, detectAgentIdentity } = require('./inbox-watcher');
 
+// ── auth process tracking (login OAuth 플로우 상태) ─────────────────────────
+const authProcs = new Map(); // home → { proc, url, status, output, error, exitCode }
+
 // ── HOME overlay (ec가 spawn할 claude의 ~/.claude/* 격리) ───────────────────
 // cfg.overlay.enabled === true 면 활성. 기본 off (마이그레이션 안전).
 // overlay HOME 경로: $XDG_DATA_HOME/easyclaude/overlay/
@@ -654,6 +657,122 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, {'Content-Type':'application/json'});
     try { return res.end(JSON.stringify(JSON.parse(result.stdout || '{}'))); }
     catch { return res.end(JSON.stringify({ error: result.stderr || 'parse fail', raw: result.stdout })); }
+  }
+
+  // ── /api/auth/* ── claude auth 래퍼 (login / logout / status / setup-token) ──
+  // login은 OAuth 브라우저 플로우라 spawn 후 URL 캡처 → 클라이언트가 새 탭에서 열고
+  // login-status 폴링으로 완료 확인.
+  if (req.url.startsWith('/api/auth/login-status')) {
+    const u = new URL(req.url, 'http://x');
+    const home = u.searchParams.get('home') || process.env.HOME;
+    const state = authProcs.get(home);
+    res.writeHead(200, {'Content-Type':'application/json'});
+    if (!state) return res.end(JSON.stringify({ ok:true, status: 'idle', home }));
+    return res.end(JSON.stringify({
+      ok: true,
+      status: state.status,           // pending | success | failed | killed
+      url: state.url,
+      exitCode: state.exitCode ?? null,
+      output: (state.output || '').slice(-2000),
+      error:  (state.error  || '').slice(-2000),
+      home,
+    }));
+  }
+  if (req.url.startsWith('/api/auth/login')) {
+    if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
+    return readJsonBody(req, (err, body) => {
+      if (err) { res.writeHead(400); return res.end(err.message); }
+      const method = (body && body.method) || 'claudeai';  // claudeai | console | sso
+      const home   = (body && body.home)   || process.env.HOME;
+      const flags = ['auth', 'login'];
+      if (method === 'console') flags.push('--console');
+      else if (method === 'sso') flags.push('--sso');
+      // 'claudeai' is default — no flag
+      if (body && body.email) flags.push('--email', body.email);
+      // 기존 진행 중 프로세스 종료
+      const existing = authProcs.get(home);
+      if (existing && existing.proc && existing.proc.exitCode === null) {
+        try { existing.proc.kill('SIGTERM'); } catch {}
+      }
+      const proc = spawn('claude', flags, { env: { ...process.env, HOME: home }, stdio: ['ignore','pipe','pipe'] });
+      const state = { proc, url: null, status: 'pending', output: '', error: '', exitCode: null };
+      authProcs.set(home, state);
+      proc.stdout.setEncoding('utf8');
+      proc.stderr.setEncoding('utf8');
+      const urlRe = /https?:\/\/[^\s'"]+/;
+      proc.stdout.on('data', d => {
+        state.output += d;
+        const m = state.output.match(urlRe);
+        if (m && !state.url) state.url = m[0];
+      });
+      proc.stderr.on('data', d => {
+        state.error += d;
+        // stderr에도 URL이 나올 수 있음
+        const m = (state.output + state.error).match(urlRe);
+        if (m && !state.url) state.url = m[0];
+      });
+      proc.on('exit', (code, signal) => {
+        state.exitCode = code;
+        state.status = signal === 'SIGTERM' ? 'killed' : (code === 0 ? 'success' : 'failed');
+      });
+      // URL 캡처 위해 잠시 대기 후 응답 (claude가 OAuth URL 출력하는 데 ~1s)
+      const respondAt = Date.now() + 2500;
+      const tick = setInterval(() => {
+        if (state.url || Date.now() >= respondAt || state.exitCode !== null) {
+          clearInterval(tick);
+          res.writeHead(200, {'Content-Type':'application/json'});
+          res.end(JSON.stringify({ ok: true, url: state.url, status: state.status, home, hint: 'GET /api/auth/login-status?home=<>로 폴링' }));
+        }
+      }, 200);
+    });
+  }
+  if (req.url.startsWith('/api/auth/logout')) {
+    if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
+    return readJsonBody(req, (err, body) => {
+      if (err) { res.writeHead(400); return res.end(err.message); }
+      const home = (body && body.home) || process.env.HOME;
+      const { spawnSync } = require('child_process');
+      const r = spawnSync('claude', ['auth', 'logout'], {
+        env: { ...process.env, HOME: home },
+        timeout: 10000, encoding: 'utf8',
+      });
+      // 진행 중 login proc 있으면 정리
+      const existing = authProcs.get(home);
+      if (existing && existing.proc && existing.proc.exitCode === null) {
+        try { existing.proc.kill('SIGTERM'); } catch {}
+      }
+      authProcs.delete(home);
+      res.writeHead(200, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ ok: r.status === 0, stdout: r.stdout, stderr: r.stderr, home }));
+    });
+  }
+  if (req.url.startsWith('/api/auth/setup-token')) {
+    if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
+    return readJsonBody(req, (err, body) => {
+      if (err) { res.writeHead(400); return res.end(err.message); }
+      const home = (body && body.home) || process.env.HOME;
+      // setup-token은 인터랙티브 — login과 동일 패턴으로 spawn 후 URL/토큰 캡처
+      const existing = authProcs.get(home);
+      if (existing && existing.proc && existing.proc.exitCode === null) {
+        try { existing.proc.kill('SIGTERM'); } catch {}
+      }
+      const proc = spawn('claude', ['setup-token'], { env: { ...process.env, HOME: home }, stdio: ['ignore','pipe','pipe'] });
+      const state = { proc, url: null, status: 'pending', output: '', error: '', exitCode: null };
+      authProcs.set(home, state);
+      proc.stdout.setEncoding('utf8'); proc.stderr.setEncoding('utf8');
+      const urlRe = /https?:\/\/[^\s'"]+/;
+      proc.stdout.on('data', d => { state.output += d; const m = state.output.match(urlRe); if (m && !state.url) state.url = m[0]; });
+      proc.stderr.on('data', d => { state.error += d; });
+      proc.on('exit', (code, signal) => { state.exitCode = code; state.status = signal === 'SIGTERM' ? 'killed' : (code === 0 ? 'success' : 'failed'); });
+      const respondAt = Date.now() + 2500;
+      const tick = setInterval(() => {
+        if (state.url || Date.now() >= respondAt || state.exitCode !== null) {
+          clearInterval(tick);
+          res.writeHead(200, {'Content-Type':'application/json'});
+          res.end(JSON.stringify({ ok: true, url: state.url, status: state.status, home }));
+        }
+      }, 200);
+    });
   }
 
   // /api/claude-settings?home=...[&force=1]  GET: 읽기 / PUT: body 로 저장

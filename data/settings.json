@@ -11,7 +11,6 @@
     "allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "WebFetch(*)", "Glob(*)", "Grep(*)", "Agent(*)"],
     "defaultMode": "auto"
   },
-  "model": "opus",
   "enableAllProjectMcpServers": true,
   "language": "한국어",
   "channelsEnabled": true,
