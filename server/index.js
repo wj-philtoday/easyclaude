@@ -53,6 +53,30 @@ function spawnClaudePty(args, env) {
 const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[=>NOP\\\(\)\*\+]|\x1b\[\?[0-9;]+[hl]/g;
 function stripAnsi(s) { return String(s).replace(ANSI_RE, ''); }
 
+// PTY 80-col wrap된 OAuth URL 재조립용. claude code의 URL은 보통 한 줄에 ~80 char로 잘려
+// 줄바꿈이 끼어서 출력됨. 매칭 전에 모든 whitespace를 제거한 사본에서 URL 추출.
+// claude OAuth URL — PTY 80-col wrap 재조립.
+// 같은 https://...로 시작하는 줄을 찾고, 그 뒤 줄들이 url-safe char로만 구성되면 합쳐 본 URL 완성.
+const OAUTH_LINE_RE = /(https:\/\/(?:claude\.com|console\.anthropic\.com|platform\.claude\.com)\/\S*)/;
+const OAUTH_CONT_RE = /^[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+$/;
+function tryCaptureOAuthUrl(state) {
+  if (state.url) return;
+  const raw = stripAnsi((state.output || '') + (state.error || ''));
+  const lines = raw.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(OAUTH_LINE_RE);
+    if (!m) continue;
+    let url = m[1];
+    for (let j = i + 1; j < lines.length; j++) {
+      const next = (lines[j] || '').trim();
+      if (!next) break;                    // 빈 줄 만나면 URL 끝
+      if (!OAUTH_CONT_RE.test(next)) break; // URL-safe char 외 만나면 끝 (예: 'Paste code...')
+      url += next;
+    }
+    if (url.length > 50) { state.url = url; return; }
+  }
+}
+
 // ── HOME overlay (ec가 spawn할 claude의 ~/.claude/* 격리) ───────────────────
 // 기본 ON — ec는 단일 자체 HOME(overlay)으로 claude를 spawn한다.
 // cfg.overlay.enabled === false 명시 시에만 비활성 (real HOME 사용).
@@ -781,28 +805,21 @@ const server = http.createServer((req, res) => {
       authProcs.set(home, state);
       proc.stdout.setEncoding('utf8');
       proc.stderr.setEncoding('utf8');
-      const urlRe = /https?:\/\/[^\s'"\x1b]+/;
-      const tryCaptureUrl = () => {
-        if (state.url) return;
-        const cleaned = stripAnsi(state.output + state.error);
-        const m = cleaned.match(urlRe);
-        if (m) state.url = m[0];
-      };
-      proc.stdout.on('data', d => { state.output += d; tryCaptureUrl(); });
-      proc.stderr.on('data', d => { state.error  += d; tryCaptureUrl(); });
+      proc.stdout.on('data', d => { state.output += d; tryCaptureOAuthUrl(state); });
+      proc.stderr.on('data', d => { state.error  += d; tryCaptureOAuthUrl(state); });
       proc.on('exit', (code, signal) => {
         state.exitCode = code;
         state.status = signal === 'SIGTERM' ? 'killed' : (code === 0 ? 'success' : 'failed');
       });
-      // URL 캡처 위해 대기 (PTY 안 claude가 splash 후 URL 출력까지 보통 1~3s)
-      const respondAt = Date.now() + 4000;
+      // URL 캡처 위해 대기 — PTY 80 char wrap된 splash가 ~10s, URL은 그 뒤에 나옴
+      const respondAt = Date.now() + 15000;
       const tick = setInterval(() => {
         if (state.url || Date.now() >= respondAt || state.exitCode !== null) {
           clearInterval(tick);
           res.writeHead(200, {'Content-Type':'application/json'});
           res.end(JSON.stringify({ ok: true, url: state.url, status: state.status, home, hint: 'GET /api/auth/login-status?home=<>로 폴링' }));
         }
-      }, 200);
+      }, 300);
     });
   }
   if (req.url.startsWith('/api/auth/logout')) {
@@ -880,28 +897,18 @@ const server = http.createServer((req, res) => {
       const state = { proc, url: null, status: 'pending', output: '', error: '', exitCode: null };
       authProcs.set(home, state);
       proc.stdout.setEncoding('utf8'); proc.stderr.setEncoding('utf8');
-      const urlRe = /https?:\/\/[^\s'"\x1b]+/;
-      const tryCaptureUrl = () => {
-        if (state.url) return;
-        const cleaned = stripAnsi(state.output + state.error);
-        const m = cleaned.match(urlRe);
-        if (m) state.url = m[0];
-      };
-      proc.stdout.on('data', d => { state.output += d; tryCaptureUrl(); });
-      proc.stderr.on('data', d => { state.error  += d; tryCaptureUrl(); });
+      proc.stdout.on('data', d => { state.output += d; tryCaptureOAuthUrl(state); });
+      proc.stderr.on('data', d => { state.error  += d; tryCaptureOAuthUrl(state); });
       proc.on('exit', (code, signal) => { state.exitCode = code; state.status = signal === 'SIGTERM' ? 'killed' : (code === 0 ? 'success' : 'failed'); });
-      // setup-token은 splash 후 메뉴 → 1~2회 Enter로 진행해야 URL이 나오는 경우가 있음.
-      // 안전하게 1.2s/2.4s 시점에 \r 두 번 자동 전송.
-      setTimeout(() => { try { if (!state.url && state.exitCode === null) proc.stdin.write('\r'); } catch {} }, 1200);
-      setTimeout(() => { try { if (!state.url && state.exitCode === null) proc.stdin.write('\r'); } catch {} }, 2400);
-      const respondAt = Date.now() + 5000;
+      // PTY 안 claude는 splash ~10s 후 URL 출력. timeout 충분히.
+      const respondAt = Date.now() + 15000;
       const tick = setInterval(() => {
         if (state.url || Date.now() >= respondAt || state.exitCode !== null) {
           clearInterval(tick);
           res.writeHead(200, {'Content-Type':'application/json'});
           res.end(JSON.stringify({ ok: true, url: state.url, status: state.status, home }));
         }
-      }, 200);
+      }, 300);
     });
   }
 

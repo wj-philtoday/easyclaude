@@ -1766,6 +1766,12 @@ $('lg-start')?.addEventListener('click', async () => {
   const method = $('lg-method').value;
   const email = $('lg-email').value.trim();
   $('lg-message').textContent = '';
+  // PTY 안 splash 후 URL 출력까지 ~10s — 진행 안내 + 버튼 잠금
+  $('lg-step1').classList.add('ec-hidden');
+  $('lg-step2').classList.remove('ec-hidden');
+  $('lg-url').value = '';
+  $('lg-status').textContent = '⏳ OAuth URL 생성 중… (최대 15초 소요)';
+  $('lg-start').disabled = true;
   try {
     const r = await fetch(apiBase() + 'api/auth/login', {
       method: 'POST',
@@ -1773,11 +1779,10 @@ $('lg-start')?.addEventListener('click', async () => {
       body: JSON.stringify({ method, email: email || undefined, home }),
     });
     const data = await r.json();
+    $('lg-start').disabled = false;
     if (!data.ok) { $('lg-message').textContent = data.error || '로그인 시작 실패'; return; }
-    $('lg-step1').classList.add('ec-hidden');
-    $('lg-step2').classList.remove('ec-hidden');
-    if (data.url) { $('lg-url').value = data.url; }
-    else { $('lg-status').textContent = 'URL을 받지 못함 (CLI 출력 확인 필요) — 폴링 시작'; }
+    if (data.url) { $('lg-url').value = data.url; $('lg-status').textContent = '✅ URL 받음 — 새 탭/복사 후 인증'; }
+    else { $('lg-status').textContent = 'URL 미수신 — 상태 폴링 중'; }
     // polling
     if (lgPollTimer) clearInterval(lgPollTimer);
     lgPollTimer = setInterval(async () => {
@@ -1803,6 +1808,12 @@ $('lg-start')?.addEventListener('click', async () => {
 $('lg-setup-token')?.addEventListener('click', async () => {
   const home = $('ec-login').dataset.home;
   $('lg-message').textContent = '';
+  // setup-token도 splash 후 URL 출력까지 ~10s
+  $('lg-step1').classList.add('ec-hidden');
+  $('lg-step2').classList.remove('ec-hidden');
+  $('lg-url').value = '';
+  $('lg-status').textContent = '⏳ 장기 토큰 URL 생성 중… (최대 15초 소요)';
+  $('lg-setup-token').disabled = true;
   try {
     const r = await fetch(apiBase() + 'api/auth/setup-token', {
       method: 'POST',
@@ -1810,10 +1821,10 @@ $('lg-setup-token')?.addEventListener('click', async () => {
       body: JSON.stringify({ home }),
     });
     const data = await r.json();
+    $('lg-setup-token').disabled = false;
     if (!data.ok) { $('lg-message').textContent = data.error || '시작 실패'; return; }
-    $('lg-step1').classList.add('ec-hidden');
-    $('lg-step2').classList.remove('ec-hidden');
-    if (data.url) $('lg-url').value = data.url;
+    if (data.url) { $('lg-url').value = data.url; $('lg-status').textContent = '✅ URL 받음 — 새 탭/복사 후 인증'; }
+    else { $('lg-status').textContent = 'URL 미수신 — 폴링 중'; }
     if (lgPollTimer) clearInterval(lgPollTimer);
     lgPollTimer = setInterval(async () => {
       try {
