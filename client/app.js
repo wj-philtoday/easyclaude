@@ -7,7 +7,6 @@ const $parsed = $('ec-parsed-view');
 const $input = $('ec-input');
 const $send = $('ec-send-btn');
 const $interrupt = $('ec-interrupt-btn');
-const $interrupt = $('ec-interrupt-btn');
 const $restart = $('ec-restart-btn');
 const $usage = $('ec-usage');
 const $ham = $('ec-ham');
@@ -259,6 +258,15 @@ function onMsg(msg) {
     for (const sid of [...channels.keys()]) {
       if (!ecSessions.some(s => s.id === sid)) channels.delete(sid);
     }
+    // 다시 나타난(unhide / 재출현) cfg 세션은 hidden store에서 제거
+    const store = loadHiddenStore();
+    let storeDirty = false;
+    for (const s of ecSessions) {
+      if (store[s.id]) { delete store[s.id]; storeDirty = true; }
+    }
+    if (storeDirty) saveHiddenStore(store);
+    // 설정 패널이 열려있으면 hidden 섹션도 재렌더
+    if (!$settings.classList.contains('ec-hidden')) renderHiddenSessions();
     renderTabs();
     // reconnect 후 이전 활성 세션 자동 복귀
     if (pendingReopenSid && ecSessions.some(s => s.id === pendingReopenSid)) {
@@ -283,6 +291,23 @@ function onMsg(msg) {
     channels.delete(msg.sessionId);
     if (activeSid === msg.sessionId) activeSid = null;
     refreshTabState();
+    return;
+  }
+  if (op === 'session_purged') {
+    // 서버는 broadcastSessions 도 같이 보내지만 ack 도 따로 처리
+    channels.delete(msg.sessionId);
+    if (activeSid === msg.sessionId) activeSid = null;
+    if (!msg.hidden) {
+      // adhoc 세션은 복원 불가 — store 에서도 제거
+      forgetHiddenSession(msg.sessionId);
+    }
+    if (!$settings.classList.contains('ec-hidden')) renderHiddenSessions();
+    refreshTabState();
+    return;
+  }
+  if (op === 'session_unhidden') {
+    forgetHiddenSession(msg.sessionId);
+    if (!$settings.classList.contains('ec-hidden')) renderHiddenSessions();
     return;
   }
   const ch = id != null ? [...channels.values()].find(c => c.id === id) : null;
@@ -484,6 +509,7 @@ function showTabMenu(s, anchor) {
   document.querySelectorAll('.ec-tab-popup').forEach(el => el.remove());
   const rect = anchor.getBoundingClientRect();
   const pref = tabPrefs[s.id] || {};
+  const isAdhoc = !!s.meta?.adhoc;
   const menu = document.createElement('div');
   menu.className = 'ec-tab-popup';
   menu.style.left = rect.right + 'px';
@@ -494,6 +520,10 @@ function showTabMenu(s, anchor) {
                      <button data-act="pin-down">▼ 아래로</button>` : ''}
     <button data-act="group">📂 그룹 설정…</button>
     <button data-act="restart">↻ 재기동</button>
+    <hr style="border:0;border-top:1px solid var(--border);margin:4px 0">
+    ${isAdhoc ? `<button data-act="delete">🗑 삭제</button>` : ''}
+    <button data-act="purge" style="color:var(--danger,#c0392b)">⚠ 영구 삭제 (purge)</button>
+    <button data-act="hidden-panel">👁 숨김 해제는 별도 화면에서</button>
   `;
   document.body.appendChild(menu);
   const close = () => menu.remove();
@@ -535,19 +565,99 @@ function showTabMenu(s, anchor) {
       if (!confirm(`'${s.label}' 세션을 재기동할까요? (claudeId 보존)`)) { close(); return; }
       const ch = channels.get(s.id);
       if (ch) sendWs({ op:'restart', id: ch.id });
+    } else if (act === 'delete') {
+      handleTabDelete(s);
+    } else if (act === 'purge') {
+      handleTabPurge(s);
+    } else if (act === 'hidden-panel') {
+      // 설정 패널 열고 숨김 섹션으로 스크롤
+      $settings.classList.remove('ec-hidden');
+      renderHomesList();
+      renderHiddenSessions();
+      setTimeout(() => {
+        const sec = $('ec-hidden-sessions-section');
+        if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 50);
     }
     close();
   });
 }
 
+// adhoc 세션만 가능. config 파일 변경 없음.
+function handleTabDelete(s) {
+  if (!s.meta?.adhoc) {
+    alert('config 세션은 "삭제"가 불가합니다.\n영구 삭제(purge)로 숨김 처리하세요.');
+    return;
+  }
+  if (!confirm(`'${s.label}' 세션을 목록에서 제거할까요?\n(jsonl 파일은 보존됩니다)`)) return;
+  sendWs({ op: 'delete_session', id: nextClientId++, sessionId: s.id });
+}
+
+// 강한 확인 — irreversible. cfg 세션의 경우 hidden 처리 (복원 가능),
+// adhoc 세션의 경우 jsonl 까지 제거.
+function handleTabPurge(s) {
+  const isAdhoc = !!s.meta?.adhoc;
+  // cfg 세션이면 향후 복원을 위해 라벨/claudeId를 로컬에 기억
+  if (!isAdhoc) {
+    rememberHiddenSession(s);
+  }
+  const warn = isAdhoc
+    ? `'${s.label}' 세션을 영구 삭제합니다.\n` +
+      `• 세션 목록에서 제거\n` +
+      `• ~/.claude/projects/.../*.jsonl 파일까지 제거\n` +
+      `이 작업은 되돌릴 수 없습니다.\n\n계속하려면 OK.`
+    : `'${s.label}' (config 세션)을 숨김 처리합니다.\n` +
+      `• 목록에서 숨김 (config 파일은 보존)\n` +
+      `• ~/.claude/projects/.../*.jsonl 파일까지 제거\n` +
+      `숨김 해제는 "설정 → 숨김된 세션" 에서 가능합니다.\n\n계속하려면 OK.`;
+  if (!confirm(warn)) return;
+  // 2단계 확인 — 더블 클릭 실수 방지
+  const second = prompt(`확인: 정말 영구 삭제할까요?\n세션 ID '${s.id}' 를 입력해 확정하세요.`);
+  if (second !== s.id) {
+    alert('취소되었습니다 (id 미일치).');
+    return;
+  }
+  sendWs({ op: 'purge_session', id: nextClientId++, sessionId: s.id });
+}
+
+// ── 숨김된 세션 기억 (localStorage) ─────────────────────────────────────────
+// 서버 사이드 sessions() 가 hidden을 필터링하므로, 복원 가능한 cfg 세션 id를
+// 클라이언트에서 기억해 두어야 한다.
+const HIDDEN_KEY = 'easyclaude.hiddenSessions';
+function loadHiddenStore() {
+  try { return JSON.parse(localStorage.getItem(HIDDEN_KEY) || '{}'); }
+  catch { return {}; }
+}
+function saveHiddenStore(store) {
+  localStorage.setItem(HIDDEN_KEY, JSON.stringify(store));
+}
+function rememberHiddenSession(s) {
+  const store = loadHiddenStore();
+  store[s.id] = {
+    id: s.id,
+    label: s.label || s.id,
+    cwd: s.cwd || '',
+    hiddenAt: new Date().toISOString(),
+  };
+  saveHiddenStore(store);
+}
+function forgetHiddenSession(sid) {
+  const store = loadHiddenStore();
+  delete store[sid];
+  saveHiddenStore(store);
+}
+
 function handleTabClose(s) {
   const ch = channels.get(s.id);
   const isAlive = ch && ch.alive;
+  const isAdhoc = !!s.meta?.adhoc;
   if (isAlive) {
     if (!confirm(`'${s.label}'은 실행 중입니다. 강제로 영구 삭제할까요?\n(jsonl 파일까지 제거)`)) return;
   } else {
     if (!confirm(`'${s.label}' 세션을 목록에서 영구 제거할까요?\n(jsonl 파일까지 제거)`)) return;
   }
+  // cfg 세션이면 향후 복원 가능 — 로컬에 기억
+  if (!isAdhoc) rememberHiddenSession(s);
   sendWs({ op: 'purge_session', id: nextClientId++, sessionId: s.id });
 }
 
@@ -630,13 +740,13 @@ async function showJsonlHistory(sid) {
     el.id = 'ec-jsonl-modal';
     el.className = 'ec-dialog ec-hidden';
     el.innerHTML = `
-      <div class="ec-dialog-panel" style="max-width:900px;width:95vw;max-height:90vh;display:flex;flex-direction:column">
+      <div class="ec-dialog-panel ec-jsonl-panel">
         <div class="ec-dialog-head">
-          <h3 style="margin:0">jsonl 히스토리 — <span id="jh-info"></span></h3>
+          <h3>jsonl 히스토리 — <span id="jh-info"></span></h3>
           <button id="jh-close" class="ec-icon-btn">✕</button>
         </div>
-        <div id="jh-loader" style="text-align:center;padding:8px;color:var(--text-2);font-size:12px"></div>
-        <div id="jh-body" style="overflow:auto;flex:1;padding:12px;background:var(--bg-deep,#f5f1ec);font-size:11px;font-family:ui-monospace,monospace"></div>
+        <div id="jh-loader" class="ec-jsonl-loader"></div>
+        <div id="jh-body" class="ec-jsonl-body"></div>
       </div>`;
     document.body.appendChild(el);
     el.querySelector('#jh-close').addEventListener('click', () => el.classList.add('ec-hidden'));
@@ -695,7 +805,7 @@ function renderJsonlEntries(entries, prepend) {
         : (typeof e.message.content === 'string' ? e.message.content.slice(0, 80) : '')
     ) : '';
     const body = JSON.stringify(e).slice(0, 220);
-    return `<div style="padding:4px 0;border-bottom:1px solid var(--border,#eee)"><b>${esc(t)}</b> ${esc(summary)}<br><span style="color:var(--muted)">${esc(body)}</span></div>`;
+    return `<div class="ec-jsonl-entry"><b>${esc(t)}</b> ${esc(summary)}<span class="ec-jsonl-entry-raw">${esc(body)}</span></div>`;
   }).join('');
   if (prepend) body.insertAdjacentHTML('afterbegin', html);
   else body.innerHTML = html;
@@ -835,11 +945,6 @@ $input.addEventListener('keydown', e => {
 });
 $input.addEventListener('input', () => { autosize(); updateAc(); });
 
-$interrupt.addEventListener('click', () => {
-  const ch = activeChannel();
-  if (!ch) return;
-  sendWs({ op:'interrupt', id: ch.id });
-});
 $restart.addEventListener('click', () => {
   const ch = activeChannel();
   if (!ch) return;
@@ -941,6 +1046,13 @@ function hideDialog() {
   $dialog.classList.add('ec-hidden');
   currentDialog = null;
 }
+// 백드롭 클릭 + Esc로 닫기 (다른 모달과 일관성)
+$dialog?.addEventListener('click', (e) => { if (e.target === $dialog) hideDialog(); });
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $dialog && !$dialog.classList.contains('ec-hidden')) {
+    hideDialog();
+  }
+});
 
 function collectDialogAnswers() {
   const d = currentDialog;
@@ -1040,12 +1152,12 @@ function showSlashResult(cmd, data) {
     el.id = 'ec-slash-modal';
     el.className = 'ec-dialog ec-hidden';
     el.innerHTML = `
-      <div class="ec-dialog-box" style="max-width:720px;width:90vw">
+      <div class="ec-dialog-box">
         <div class="ec-dialog-head">
-          <h3 id="ec-slash-title" style="margin:0"></h3>
+          <h3 id="ec-slash-title"></h3>
           <button id="ec-slash-close" class="ec-icon-btn">✕</button>
         </div>
-        <pre id="ec-slash-body" style="overflow:auto;max-height:60vh;font-size:12px;background:var(--ec-bg-deep,#f5f1ec);padding:12px;border-radius:8px;margin:0;white-space:pre-wrap;word-break:break-word"></pre>
+        <pre id="ec-slash-body" class="ec-slash-body"></pre>
       </div>`;
     document.body.appendChild(el);
     el.querySelector('#ec-slash-close').addEventListener('click', () => el.classList.add('ec-hidden'));
@@ -1278,6 +1390,51 @@ $('info-restart-apply')?.addEventListener('click', () => {
   sendWs({ op:'restart', id: ch.id, args: newArgs });
   $('ec-info').classList.add('ec-hidden');
 });
+
+// ── 숨김된 세션 패널 (설정 안) ─────────────────────────────────────────────────
+function renderHiddenSessions() {
+  const $list = $('cfg-hidden-sessions');
+  if (!$list) return;
+  const store = loadHiddenStore();
+  const items = Object.values(store).sort((a, b) =>
+    String(b.hiddenAt || '').localeCompare(String(a.hiddenAt || '')));
+  if (!items.length) {
+    $list.innerHTML = `<div class="ec-empty">이 브라우저에서 숨긴 세션이 없습니다.
+      아래 입력으로 세션 ID를 직접 입력해 복원할 수도 있습니다.</div>`;
+    return;
+  }
+  $list.innerHTML = items.map(it => `
+    <div class="ec-home-card" data-sid="${esc(it.id)}">
+      <div class="ec-home-row">
+        <div class="ec-home-path">
+          <code>${esc(it.id)}</code>
+          <span style="margin-left:8px;opacity:.7">— ${esc(it.label)}</span>
+        </div>
+      </div>
+      <div class="ec-home-row ec-home-meta">
+        <span>${it.cwd ? esc(it.cwd) : '(cwd 미상)'}</span>
+        <span>${it.hiddenAt ? esc(it.hiddenAt.slice(0, 19).replace('T', ' ')) : ''}</span>
+      </div>
+      <div class="ec-home-actions">
+        <button class="ec-btn ec-btn-primary ec-hidden-restore" data-sid="${esc(it.id)}">↩ 복원</button>
+        <button class="ec-btn ec-hidden-forget" data-sid="${esc(it.id)}">목록에서만 제거</button>
+      </div>
+    </div>
+  `).join('');
+  $list.querySelectorAll('.ec-hidden-restore').forEach(b => {
+    b.addEventListener('click', () => {
+      const sid = b.dataset.sid;
+      sendWs({ op: 'unhide_session', id: nextClientId++, sessionId: sid });
+      // ack 도착 시 forget 처리. 실패해도 사용자가 '목록에서만 제거' 가능.
+    });
+  });
+  $list.querySelectorAll('.ec-hidden-forget').forEach(b => {
+    b.addEventListener('click', () => {
+      forgetHiddenSession(b.dataset.sid);
+      renderHiddenSessions();
+    });
+  });
+}
 
 // ── Claude home cards in settings ─────────────────────────────────────────────
 async function renderHomesList() {
@@ -1527,7 +1684,17 @@ $('se-save')?.addEventListener('click', async () => {
 
 // settings 모달 열 때 homes list 채우기
 const _origSettingsOpen = () => $settings.classList.remove('ec-hidden');
-$settingsBtn?.addEventListener('click', () => { renderHomesList(); });
+$settingsBtn?.addEventListener('click', () => { renderHomesList(); renderHiddenSessions(); });
+
+// 수동 unhide (서버 측 sessionState에는 있으나 이 브라우저 store에 없는 경우)
+$('cfg-hidden-manual-btn')?.addEventListener('click', () => {
+  const inp = $('cfg-hidden-manual-id');
+  const sid = (inp?.value || '').trim();
+  if (!sid) { inp?.focus(); return; }
+  if (!confirm(`'${sid}' 세션의 숨김을 해제할까요?\n(서버 sessionState 에 hidden 플래그가 있어야 효과 있음)`)) return;
+  sendWs({ op: 'unhide_session', id: nextClientId++, sessionId: sid });
+  inp.value = '';
+});
 
 // ── 새 세션 생성 / 부활 ───────────────────────────────────────────────────────
 let nsActiveTab = 'new'; // 'new' | 'resume'

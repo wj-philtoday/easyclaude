@@ -39,18 +39,13 @@
         <button id="ec-interrupt-btn" class="ec-action-btn" title="중단 (SIGINT)">⏹ 중단</button>
         <button id="ec-restart-btn" class="ec-action-btn" title="세션 재기동">↻ 재기동</button>
         <span id="ec-usage" class="ec-usage"></span>
-        <button id="ec-history-btn" class="ec-icon-btn" title="jsonl 히스토리" style="margin-left:6px;font-size:11px;padding:2px 8px">📜</button>
+        <button id="ec-history-btn" class="ec-history-btn" title="jsonl 히스토리">📜 히스토리</button>
       </div>
       <div id="ec-inputbar" class="ec-inputbar">
         <div id="ec-autocomplete" class="ec-autocomplete ec-hidden"></div>
         <textarea id="ec-input" autocomplete="off" autocorrect="off"
                autocapitalize="none" spellcheck="false" rows="2"
                placeholder="메시지 입력… (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
-        <button id="ec-interrupt-btn" title="중단 (ESC)" aria-label="중단" style="margin-right:4px">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="6" y="6" width="12" height="12" rx="2"/>
-          </svg>
-        </button>
         <button id="ec-send-btn" title="전송" aria-label="전송">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M5 12h14M13 5l7 7-7 7"/>
@@ -105,7 +100,7 @@
 
 <!-- Login 모달 -->
 <div id="ec-login" class="ec-dialog ec-hidden">
-  <div class="ec-dialog-panel" style="max-width:520px">
+  <div class="ec-dialog-panel">
     <div class="ec-dialog-head">
       <h3>Claude 로그인 — <span id="lg-home-label"></span></h3>
       <button id="lg-close" class="ec-icon-btn">✕</button>
@@ -123,18 +118,18 @@
         <span>이메일 (선택, claude.ai/SSO 미리 채움)</span>
         <input id="lg-email" type="email" placeholder="you@example.com">
       </label>
-      <div id="lg-step1" style="display:flex;gap:8px;flex-direction:column">
+      <div id="lg-step1" class="ec-login-step">
         <button id="lg-start" class="ec-btn ec-btn-primary">로그인 시작 (OAuth)</button>
         <button id="lg-setup-token" class="ec-btn">장기 토큰 발급 (subscription 필요)</button>
       </div>
       <div id="lg-step2" class="ec-hidden">
         <p>아래 URL을 새 탭에서 열고 OAuth 완료하세요:</p>
-        <div style="display:flex;gap:6px;align-items:center;margin:8px 0">
-          <input id="lg-url" readonly style="flex:1;font-size:11px">
+        <div class="ec-login-url-row">
+          <input id="lg-url" readonly>
           <button id="lg-open" class="ec-btn">새 탭</button>
           <button id="lg-copy" class="ec-btn">복사</button>
         </div>
-        <div id="lg-status" class="ec-field-hint">대기 중…</div>
+        <div id="lg-status" class="ec-login-status">대기 중…</div>
       </div>
       <div id="lg-message" class="ec-field-hint" style="color: var(--danger)"></div>
     </div>
@@ -340,6 +335,22 @@
         </label>
       </section>
 
+      <section class="ec-settings-section" id="ec-hidden-sessions-section">
+        <h4>숨김된 세션</h4>
+        <small class="ec-field-hint">config 세션을 영구 삭제(purge)하면 목록에서 숨겨지지만 config 파일은 보존됩니다. 여기서 복원할 수 있습니다.</small>
+        <div id="cfg-hidden-sessions" class="ec-homes-list" style="margin-top:8px">
+          <div class="ec-empty">로드 중…</div>
+        </div>
+        <details style="margin-top:10px">
+          <summary>수동 복원 (세션 ID 직접 입력)</summary>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:8px">
+            <input id="cfg-hidden-manual-id" type="text" placeholder="세션 ID (예: nomon)" style="flex:1">
+            <button id="cfg-hidden-manual-btn" class="ec-btn">복원</button>
+          </div>
+          <small class="ec-field-hint">다른 브라우저에서 숨김 처리한 경우 ID를 직접 입력해 복원 시도 가능.</small>
+        </details>
+      </section>
+
       <section class="ec-settings-section">
         <h4>Claude 인증 / 설정</h4>
         <div id="cfg-homes-list" class="ec-homes-list">
@@ -357,6 +368,6 @@
   </div>
 </div>
 
-<script src="app.js?v=20260511h"></script>
+<script src="app.js?v=20260511i"></script>
 </body>
 </html>

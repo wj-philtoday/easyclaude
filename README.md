@@ -176,7 +176,7 @@ read-only 이므로 실행 중인 세션에 영향 없음.
 ### WebSocket
 
 - `list` / `sessions`
-- `open` / `opened` / `closed` / `restart` / `restarted` / `interrupt`
+- `open` / `opened` / `close` / `restart` / `restarted` / `interrupt`
 - `input` (사용자 텍스트) / `turns` (서버 → 클라이언트 누적 turn 목록)
 - `create_session` / `session_created` / `resume_session`
 - `delete_session` / `purge_session` / `session_purged` / `unhide_session`

@@ -1140,3 +1140,190 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
   padding: 1px 5px;
   border-radius: 3px;
 }
+
+/* ── Slash command result modal (동적 빌드 in app.js) ─────────────────────── */
+/* showSlashResult 가 .ec-dialog-box 로 패널을 짓는다 (legacy 이름).
+   .ec-dialog-panel 과 동일한 스타일을 적용. */
+.ec-dialog-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  max-width: 720px;
+  width: min(720px, 95vw);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+}
+
+#ec-slash-modal .ec-dialog-head h3 {
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--accent);
+}
+.ec-slash-body {
+  flex: 1;
+  overflow: auto;
+  max-height: 60vh;
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── jsonl history modal (동적 빌드 in app.js) ────────────────────────────── */
+.ec-jsonl-panel {
+  max-width: 900px;
+  width: min(900px, 95vw);
+  max-height: 90vh;
+}
+.ec-jsonl-loader {
+  text-align: center;
+  padding: 6px 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  min-height: 22px;
+}
+.ec-jsonl-body {
+  flex: 1;
+  overflow: auto;
+  padding: 8px 12px;
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.ec-jsonl-entry {
+  padding: 5px 4px;
+  border-bottom: 1px solid var(--border);
+  word-break: break-word;
+}
+.ec-jsonl-entry:last-child { border-bottom: none; }
+.ec-jsonl-entry b {
+  color: var(--accent);
+  font-weight: 700;
+  margin-right: 4px;
+}
+.ec-jsonl-entry-raw {
+  color: var(--muted);
+  font-size: 10.5px;
+  display: block;
+  margin-top: 2px;
+}
+
+/* ── Login modal (#ec-login) ──────────────────────────────────────────────── */
+#ec-login .ec-dialog-panel { max-width: 520px; }
+#ec-login #lg-method,
+#ec-login #lg-email {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  font-size: 13px;
+}
+#ec-login #lg-method:focus,
+#ec-login #lg-email:focus {
+  outline: none;
+  border-color: var(--accent-3);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-3) 18%, transparent);
+}
+.ec-login-step {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+.ec-login-url-row {
+  display: flex; gap: 6px; align-items: center;
+  margin: 8px 0;
+}
+#ec-login #lg-url {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 6px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ec-login-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-2);
+  font-family: var(--mono);
+}
+.ec-login-status::before {
+  content: "";
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+.ec-login-status.ec-login-ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, var(--border)); }
+.ec-login-status.ec-login-ok::before { background: var(--green); }
+.ec-login-status.ec-login-err { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
+.ec-login-status.ec-login-err::before { background: var(--danger); }
+
+/* ── Action bar 새 버튼 정렬 (interrupt / history) ────────────────────────── */
+#ec-interrupt-btn.ec-action-btn {
+  /* 위험성 강조: hover/active 시 danger 톤 */
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
+}
+#ec-interrupt-btn.ec-action-btn:hover {
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface-2));
+  border-color: var(--danger);
+  color: var(--danger);
+}
+#ec-interrupt-btn.ec-action-btn:active {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--surface);
+}
+.ec-history-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  min-height: 30px;
+  margin-left: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12px;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.ec-history-btn:hover { background: var(--surface-3); color: var(--text); border-color: var(--border-strong); }
+
+/* Mobile: dialog panels — slash/jsonl 도 full-screen 처리 */
+@media (max-width: 720px) {
+  .ec-dialog-box,
+  .ec-jsonl-panel {
+    max-width: 100%;
+    width: 100%;
+    max-height: 100%;
+    border-radius: 0;
+    border: none;
+  }
+}
