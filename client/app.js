@@ -731,8 +731,11 @@ function openSession(sessionId) {
   };
   channels.set(sessionId, ch);
   sendWs({ op: 'open', id, sessionId });
-  // 첫 history 페이지 로드 (jsonl 아직 없으면 빈 응답 — OK)
-  loadMoreHistory(ch);
+  // 세션을 열면 jsonl 옛 turn을 자동 로드 — 대화창 안에서 그대로 이어 보이게.
+  // 첫 페이지 로드 후 스크롤은 bottom으로 (가장 최근 대화부터 보이게).
+  loadMoreHistory(ch).then(() => {
+    if (ch.sessionId === activeSid) $parsed.scrollTop = $parsed.scrollHeight;
+  });
 }
 
 // ── 대화창 in-place history (jsonl 파스 turn을 위 스크롤로 prepend) ──────────
@@ -789,7 +792,8 @@ function shouldHideTurn(t) {
   return HIDDEN_TYPES_DEFAULT.has(t.type);
 }
 
-// ── jsonl 페이지네이션 (총 라인 + 더 불러오기) ────────────────────────────────
+// ── (제거됨) jsonl 모달 — 대화창 in-place history로 대체 ────────────────────
+/* DEPRECATED 모달 코드 — 의도적으로 제거. 옛 대화는 대화창에서 위로 스크롤하면 자동 로드.
 async function fetchJsonlInfo(sid) {
   try {
     const r = await fetch(apiBase() + 'api/sessions/' + encodeURIComponent(sid) + '/jsonl?offset=0&limit=1&parse=0');
@@ -936,6 +940,7 @@ function renderJsonlEntries(entries, prepend) {
   if (prepend) body.insertAdjacentHTML('afterbegin', html);
   else body.innerHTML = html;
 }
+*/
 
 function renderActive() {
   if (!activeSid) {
@@ -959,6 +964,22 @@ function renderActive() {
   const ch = channels.get(activeSid);
   if (!ch) { $parsed.innerHTML = ''; return; }
   const allTurns = [...(ch.histTurns || []), ...(ch.turns || [])];
+  // Auth/리밋 stalled 감지 — turn body에 키워드 검출 (claude code가 assistant/result로 emit하는 텍스트)
+  if (!ch.stalled) {
+    for (let i = allTurns.length - 1; i >= Math.max(0, allTurns.length - 30); i--) {
+      const t = allTurns[i];
+      const b = typeof t?.body === 'string' ? t.body : '';
+      if (!b) continue;
+      if (/not logged in|please run \/login|please log in|run \/login|invalid api key|api key not found/i.test(b)) {
+        ch.stalled = { kind: 'auth', message: b.slice(0, 400) };
+        break;
+      }
+      if (/rate limit|usage limit reached|quota exceeded|too many requests/i.test(b)) {
+        ch.stalled = { kind: 'rate_limit', message: b.slice(0, 400) };
+        break;
+      }
+    }
+  }
   const visible = allTurns.filter(t => !shouldHideTurn(t));
   const hiddenCount = allTurns.length - visible.length;
   const pending = ch.pendingInputs || [];
@@ -1134,14 +1155,6 @@ $interrupt?.addEventListener('click', () => {
   if (!ch) return;
   sendWs({ op: 'interrupt', id: ch.id });
 });
-$('ec-history-btn')?.addEventListener('click', () => {
-  const ch = activeChannel();
-  if (!ch) return;
-  // 모달 대신 대화창에서 위로 스크롤 + 추가 history 즉시 로드
-  $parsed.scrollTop = 0;
-  loadMoreHistory(ch);
-});
-
 // 대화창 위 스크롤 → history 더 로드 (in-place 무한 스크롤)
 $parsed?.addEventListener('scroll', () => {
   if ($parsed.scrollTop < 80) {
@@ -1889,7 +1902,7 @@ $('se-save')?.addEventListener('click', async () => {
 // ── 글로벌 Escape — 가장 위에 열린 모달 닫기 ────────────────────────────────
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  const candidates = ['.ec-dialog', '.ec-settings', '#ec-jsonl-modal']
+  const candidates = ['.ec-dialog', '.ec-settings']
     .map(sel => [...document.querySelectorAll(sel)])
     .flat();
   // DOM 뒤쪽이 보통 위 — 마지막 가시 모달 닫음
