@@ -14,6 +14,22 @@ const { startWatcher: startInboxWatcher, eventToChannelText, detectAgentIdentity
 // ── auth process tracking (login OAuth 플로우 상태) ─────────────────────────
 const authProcs = new Map(); // home → { proc, url, status, output, error, exitCode }
 
+// jsonl → turns 캐시 (대화창 위 스크롤 history용)
+const _jsonlTurnsCache = new Map(); // jsonlPath → { mtime, turns }
+function jsonlToTurns(jsonlPath) {
+  const stat = fs.statSync(jsonlPath);
+  const cached = _jsonlTurnsCache.get(jsonlPath);
+  if (cached && cached.mtime === stat.mtimeMs) return cached.turns;
+  const parser = new StreamParser({});
+  const raw = fs.readFileSync(jsonlPath, 'utf8');
+  for (const line of raw.split('\n')) {
+    if (line) parser.feedLine(line);
+  }
+  const turns = parser.snapshot().turns;
+  _jsonlTurnsCache.set(jsonlPath, { mtime: stat.mtimeMs, turns });
+  return turns;
+}
+
 // claude (login / setup-token)는 TTY를 기대 → script(1)로 PTY wrap.
 function shellEscapeArg(s) {
   if (s === '') return "''";
@@ -31,7 +47,8 @@ const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[=>N
 function stripAnsi(s) { return String(s).replace(ANSI_RE, ''); }
 
 // ── HOME overlay (ec가 spawn할 claude의 ~/.claude/* 격리) ───────────────────
-// cfg.overlay.enabled === true 면 활성. 기본 off (마이그레이션 안전).
+// 기본 ON — ec는 단일 자체 HOME(overlay)으로 claude를 spawn한다.
+// cfg.overlay.enabled === false 명시 시에만 비활성 (real HOME 사용).
 // overlay HOME 경로: $XDG_DATA_HOME/easyclaude/overlay/
 //   .claude/
 //     settings.json   ← /opt/easyclaude/data/settings.json 복사 (없을 때만)
@@ -656,10 +673,30 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify(getClaudeOptions()));
   }
 
-  // /api/claude-homes — 로컬에서 사용 가능한 .claude 디렉토리 후보 조회
+  // /api/claude-homes — DEPRECATED (multi-home 컨셉 폐기). ec는 단일 ec HOME만 다룸.
+  // 호환을 위해 ec HOME 하나만 list로 감싸 반환.
   if (req.url === '/api/claude-homes' || req.url.startsWith('/api/claude-homes?')) {
+    const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
+    let home;
+    try { home = overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+    catch { home = process.env.HOME; }
+    const info = inspectClaudeHome(home) || { home, claudeDir: path.join(home, '.claude'), email: null, hasCredentials: false, readable: true, writable: true };
+    info.overlayEnabled = overlayEnabled;
     res.writeHead(200, {'Content-Type':'application/json'});
-    return res.end(JSON.stringify({ list: scanClaudeHomes() }));
+    return res.end(JSON.stringify({ list: [info] }));
+  }
+
+  // /api/ec-home — ec가 현재 사용 중인 단일 HOME 정보
+  if (req.url === '/api/ec-home' || req.url.startsWith('/api/ec-home?')) {
+    const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
+    let home;
+    try { home = overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+    catch { home = process.env.HOME; }
+    const info = inspectClaudeHome(home) || { home, claudeDir: path.join(home, '.claude'), email: null, hasCredentials: false, readable: true, writable: true };
+    info.overlayEnabled = overlayEnabled;
+    info.realHome = process.env.HOME;
+    res.writeHead(200, {'Content-Type':'application/json'});
+    return res.end(JSON.stringify({ ok: true, ...info }));
   }
 
   // /api/auth/status?home=... — claude auth status --json
@@ -955,6 +992,52 @@ const server = http.createServer((req, res) => {
       });
     }
     res.writeHead(405); return res.end('GET or PUT');
+  }
+
+  // /api/sessions/<sid>/history-turns?before=K&limit=N
+  // jsonl 전체를 StreamParser로 파스해 turn 배열 만든 뒤 [before-limit, before) 슬라이스 반환.
+  // before 미지정 시 전체 끝(=total)에서 limit 만큼.
+  const histTurnsMatch = req.url.match(/^\/api\/sessions\/([^/]+)\/history-turns(?:\?(.*))?$/);
+  if (histTurnsMatch) {
+    const sid = decodeURIComponent(histTurnsMatch[1]);
+    const qs = new URLSearchParams(histTurnsMatch[2] || '');
+    const limit = Math.min(2000, Math.max(1, parseInt(qs.get('limit') || '100', 10) || 100));
+    const beforeRaw = qs.get('before');
+    const claudeId = sessionState[sid]?.claudeId;
+    if (!claudeId) {
+      res.writeHead(404, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ ok:true, turns: [], total: 0, start: 0, end: 0, hint: 'no claudeId yet' }));
+    }
+    const sess = findSession(sid);
+    const homes = [sess?.home, process.env.HOME].filter(Boolean);
+    let jsonlPath = null;
+    for (const h of homes) {
+      const projectsDir = path.join(h, '.claude', 'projects');
+      if (!fs.existsSync(projectsDir)) continue;
+      try {
+        for (const d of fs.readdirSync(projectsDir)) {
+          const p = path.join(projectsDir, d, claudeId + '.jsonl');
+          if (fs.existsSync(p)) { jsonlPath = p; break; }
+        }
+      } catch {}
+      if (jsonlPath) break;
+    }
+    if (!jsonlPath) {
+      res.writeHead(200, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ ok: true, turns: [], total: 0, start: 0, end: 0, hint: 'jsonl not found yet (new session?)' }));
+    }
+    try {
+      const turns = jsonlToTurns(jsonlPath);
+      const total = turns.length;
+      const before = beforeRaw != null ? Math.max(0, Math.min(total, parseInt(beforeRaw, 10) || total)) : total;
+      const start  = Math.max(0, before - limit);
+      const slice  = turns.slice(start, before);
+      res.writeHead(200, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ ok: true, turns: slice, total, start, end: before, path: jsonlPath }));
+    } catch (e) {
+      res.writeHead(500, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ error: e.message }));
+    }
   }
 
   // /api/sessions/<sid>/jsonl?offset=N&limit=M — 페이지 단위 jsonl 라인 + 총 라인 수
@@ -1300,10 +1383,12 @@ function spawnSession(sess) {
       ...defaultClaudeEnv(),
       ...(injectedEnv || {}),
     };
-    // sess.home 명시 override가 최우선. 없으면 cfg.overlay.enabled에 따라 overlay HOME.
+    // sess.home 명시 override가 최우선. 그 외엔 ec 자체 overlay HOME 사용 (기본 ON).
+    // cfg.overlay.enabled === false 로 명시한 경우에만 real HOME 사용.
+    const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
     if (sess.home) {
       childEnv.HOME = sess.home;
-    } else if (cfg && cfg.overlay && cfg.overlay.enabled === true) {
+    } else if (overlayEnabled) {
       try {
         const ovHome = ensureOverlayHome(process.env.HOME);
         childEnv.HOME = ovHome;

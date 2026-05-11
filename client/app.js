@@ -690,17 +690,52 @@ function openSession(sessionId) {
   if (channels.has(sessionId)) return;
   const id = nextClientId++;
   const meta = ecSessions.find(s => s.id === sessionId);
-  channels.set(sessionId, {
+  const ch = {
     id, sessionId,
     label: meta?.label || sessionId,
     alive: false,
     turns: [],
+    histTurns: [],     // jsonl에서 파스된 옛 turn (위 스크롤 시 prepend)
+    histStart: -1,     // 다음 페이지 fetch 시작점 (-1 = 아직 미로드, 0 = 최상단 도달)
+    histTotal: 0,
+    histLoading: false,
     pendingInputs: [],  // optimistic 사용자 메시지 (서버 echo 도착 전 표시)
     usage: null,
     session: null,
     pendingDialog: null,
-  });
+  };
+  channels.set(sessionId, ch);
   sendWs({ op: 'open', id, sessionId });
+  // 첫 history 페이지 로드 (jsonl 아직 없으면 빈 응답 — OK)
+  loadMoreHistory(ch);
+}
+
+// ── 대화창 in-place history (jsonl 파스 turn을 위 스크롤로 prepend) ──────────
+async function loadMoreHistory(ch) {
+  if (!ch || ch.histLoading) return;
+  if (ch.histStart === 0) return;  // 최상단 도달
+  ch.histLoading = true;
+  try {
+    const params = new URLSearchParams({ limit: '100' });
+    if (ch.histStart > 0) params.set('before', String(ch.histStart));
+    const r = await fetch(apiBase() + `api/sessions/${encodeURIComponent(ch.sessionId)}/history-turns?` + params.toString());
+    const data = await r.json();
+    if (!data || !data.ok) return;
+    ch.histTotal = data.total;
+    ch.histStart = data.start;
+    if (Array.isArray(data.turns) && data.turns.length) {
+      const wasActive = ch.sessionId === activeSid;
+      const prevH = wasActive ? $parsed.scrollHeight : 0;
+      const prevT = wasActive ? $parsed.scrollTop : 0;
+      ch.histTurns = data.turns.concat(ch.histTurns);
+      if (wasActive) {
+        renderActive();
+        // 스크롤 위치 보정 — prepend된 만큼 아래로
+        $parsed.scrollTop = ($parsed.scrollHeight - prevH) + prevT;
+      }
+    }
+  } catch (e) { console.warn('[ec] history load fail', e); }
+  finally { ch.histLoading = false; }
 }
 
 // ── 렌더 ──────────────────────────────────────────────────────────────────────
@@ -884,7 +919,7 @@ function renderActive() {
   }
   const ch = channels.get(activeSid);
   if (!ch) { $parsed.innerHTML = ''; return; }
-  const turns = ch.turns || [];
+  const turns = [...(ch.histTurns || []), ...(ch.turns || [])];
   const pending = ch.pendingInputs || [];
   if (!turns.length && !pending.length) {
     $parsed.innerHTML = '<div class="ec-empty">출력 대기 중…</div>';
@@ -975,7 +1010,17 @@ $interrupt?.addEventListener('click', () => {
 $('ec-history-btn')?.addEventListener('click', () => {
   const ch = activeChannel();
   if (!ch) return;
-  showJsonlHistory(ch.sessionId);
+  // 모달 대신 대화창에서 위로 스크롤 + 추가 history 즉시 로드
+  $parsed.scrollTop = 0;
+  loadMoreHistory(ch);
+});
+
+// 대화창 위 스크롤 → history 더 로드 (in-place 무한 스크롤)
+$parsed?.addEventListener('scroll', () => {
+  if ($parsed.scrollTop < 80) {
+    const ch = activeChannel();
+    if (ch) loadMoreHistory(ch);
+  }
 });
 // Escape 키: 입력칸이 비어있을 때만 인터럽트로 (포커스 있는 곳 텍스트 입력 중이면 무시)
 window.addEventListener('keydown', (e) => {
@@ -1488,68 +1533,48 @@ function renderHiddenSessions() {
   });
 }
 
-// ── Claude home cards in settings ─────────────────────────────────────────────
+// ── ec HOME 단일 카드 (settings 모달) ─────────────────────────────────────────
 async function renderHomesList() {
   const $list = $('cfg-homes-list');
   if (!$list) return;
   $list.innerHTML = '<div class="ec-empty">로드 중…</div>';
   try {
-    const r = await fetch(apiBase() + 'api/claude-homes');
-    const data = await r.json();
-    const homes = data.list || [];
-    if (!homes.length) { $list.innerHTML = '<div class="ec-empty">없음</div>'; return; }
-    // 각 home에 대해 auth status도 비동기 조회
-    const cards = homes.map(h => {
-      const id = 'home-' + h.home.replace(/[^a-z0-9]+/gi, '_');
-      const writable = h.writable;
-      const statusBadge = `<span class="ec-home-status" id="${id}-status">조회 중…</span>`;
-      return `
-        <div class="ec-home-card">
-          <div class="ec-home-row">
-            <div class="ec-home-path"><code>${esc(h.home)}</code></div>
-            ${statusBadge}
-          </div>
-          <div class="ec-home-row ec-home-meta">
-            <span>${esc(h.email || '(이메일 없음)')}</span>
-            <span>${writable ? '✏️ 쓰기 가능' : '🔒 읽기 전용'}</span>
-          </div>
-          <div class="ec-home-actions">
-            <button class="ec-btn ec-home-edit" data-home="${esc(h.home)}">settings.json 편집</button>
-            <button class="ec-btn ec-home-login" data-home="${esc(h.home)}">로그인</button>
-            <button class="ec-btn ec-home-logout" data-home="${esc(h.home)}">로그아웃</button>
-            <button class="ec-btn ec-home-tail-cmd" data-home="${esc(h.home)}">jsonl 위치</button>
-          </div>
-        </div>`;
-    });
-    $list.innerHTML = cards.join('');
-    // auth status 조회
-    for (const h of homes) {
-      const id = 'home-' + h.home.replace(/[^a-z0-9]+/gi, '_');
-      try {
-        const r2 = await fetch(apiBase() + 'api/auth/status?home=' + encodeURIComponent(h.home));
-        const st = await r2.json();
-        const el = document.getElementById(id + '-status');
-        if (!el) continue;
+    const r = await fetch(apiBase() + 'api/ec-home');
+    const h = await r.json();
+    if (!h || !h.ok) { $list.innerHTML = '<div class="ec-empty">로드 실패</div>'; return; }
+    const overlayBadge = h.overlayEnabled
+      ? '<span class="ec-badge ec-badge-ok">overlay 활성</span>'
+      : `<span class="ec-badge ec-badge-warn">real HOME (${esc(h.realHome || '')})</span>`;
+    $list.innerHTML = `
+      <div class="ec-home-card">
+        <div class="ec-home-row">
+          <div class="ec-home-path"><code>${esc(h.home)}</code></div>
+          <span class="ec-home-status" id="ec-home-status">조회 중…</span>
+        </div>
+        <div class="ec-home-row ec-home-meta">
+          <span>${esc(h.email || '(이메일 없음)')}</span>
+          <span>${h.writable ? '✏️ 쓰기 가능' : '🔒 읽기 전용'}</span>
+          ${overlayBadge}
+        </div>
+        <div class="ec-home-actions">
+          <button class="ec-btn" id="ec-home-edit-btn" data-home="${esc(h.home)}">settings.json 편집</button>
+          <button class="ec-btn" id="ec-home-login-btn" data-home="${esc(h.home)}">로그인</button>
+          <button class="ec-btn" id="ec-home-logout-btn" data-home="${esc(h.home)}">로그아웃</button>
+        </div>
+      </div>`;
+    // auth status
+    try {
+      const r2 = await fetch(apiBase() + 'api/auth/status?home=' + encodeURIComponent(h.home));
+      const st = await r2.json();
+      const el = document.getElementById('ec-home-status');
+      if (el) {
         if (st.loggedIn) el.innerHTML = `<span class="ec-badge ec-badge-ok">● ${esc(st.subscriptionType || 'logged in')}</span>`;
         else el.innerHTML = `<span class="ec-badge ec-badge-warn">○ 미로그인</span>`;
-      } catch {}
-    }
-    // 편집 버튼
-    $list.querySelectorAll('.ec-home-edit').forEach(b => {
-      b.addEventListener('click', () => openSettingsEdit(b.dataset.home));
-    });
-    // jsonl 위치 (활성 세션의 jsonl)
-    $list.querySelectorAll('.ec-home-tail-cmd').forEach(b => {
-      b.addEventListener('click', () => showJsonlPath(b.dataset.home));
-    });
-    // 로그인
-    $list.querySelectorAll('.ec-home-login').forEach(b => {
-      b.addEventListener('click', () => openLogin(b.dataset.home));
-    });
-    // 로그아웃
-    $list.querySelectorAll('.ec-home-logout').forEach(b => {
-      b.addEventListener('click', () => doLogout(b.dataset.home));
-    });
+      }
+    } catch {}
+    $('ec-home-edit-btn')?.addEventListener('click', () => openSettingsEdit(h.home));
+    $('ec-home-login-btn')?.addEventListener('click', () => openLogin(h.home));
+    $('ec-home-logout-btn')?.addEventListener('click', () => doLogout(h.home));
   } catch (e) {
     $list.innerHTML = '<div class="ec-empty">로드 실패: ' + esc(e.message) + '</div>';
   }
