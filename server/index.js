@@ -11,6 +11,38 @@ const { randomUUID } = require('crypto');
 const { StreamParser } = require('./stream-parser');
 const { startWatcher: startInboxWatcher, eventToChannelText, detectAgentIdentity } = require('./inbox-watcher');
 
+// ── claude-code 환경변수 자동 주입 (토글 가능) ───────────────────────────────
+// 기본값을 spawn 시 claude 프로세스 env에 주입한다.
+// 비활성화: cfg.claudeEnv === false
+// 부분/전체 override: cfg.claudeEnv = { KEY: "VALUE", ... }
+function defaultClaudeEnv() {
+  const defaults = {
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+    CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1',
+    CLAUDE_CODE_ENABLE_BACKGROUND_PLUGIN_REFRESH: '1',
+    CLAUDE_CODE_ENABLE_TASKS: '1',
+    CLAUDE_CODE_SYNC_PLUGIN_INSTALL: '1',
+  };
+  // cfg는 아래 loadConfig() 이후에 정의되므로 함수 호출 시점에 참조
+  const cfgEnv = (typeof cfg !== 'undefined' && cfg) ? cfg.claudeEnv : undefined;
+  if (cfgEnv === false) return {};
+  if (cfgEnv && typeof cfgEnv === 'object') return { ...defaults, ...cfgEnv };
+  return defaults;
+}
+
+// ── Bash 단축 자동 처리 ('! ' + 문자열 → '! `문자열`') ──────────────────────
+// claude TUI의 ! shortcut을 stream-json 환경에서도 동일하게 재현.
+// 이미 backtick으로 감싸져 있으면 그대로 둠. cfg.bashShortcut === false 면 비활성.
+function maybeBashShortcut(text) {
+  if (typeof cfg !== 'undefined' && cfg && cfg.bashShortcut === false) return text;
+  const m = text.match(/^!\s+([\s\S]+)$/);
+  if (!m) return text;
+  const cmd = m[1].trim();
+  if (!cmd) return text;
+  if (cmd.startsWith('`') && cmd.endsWith('`')) return text;
+  return '! `' + cmd + '`';
+}
+
 // ── Config & State 경로 (XDG + legacy 마이그레이션) ──────────────────────────
 // 우선순위:
 //   config: $EASYCLAUDE_CONFIG → ./easyclaude.config.json → $XDG_CONFIG_HOME/easyclaude/config.json
@@ -396,10 +428,123 @@ function resolvePermission(tool_use_id, result) {
 const CLIENT_DIR = path.join(__dirname, '..', 'client');
 const MIME = { '.html':'text/html','.js':'text/javascript','.css':'text/css','.json':'application/json','.svg':'image/svg+xml' };
 
+// ── slash command 상응 API helpers ───────────────────────────────────────────
+function readJsonSafe(p) {
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
+}
+function listDirSafe(p) {
+  try { return fs.readdirSync(p); } catch { return []; }
+}
+function homeDirOf(sessId) {
+  // 세션이 home override 갖고 있으면 그쪽, 아니면 process.env.HOME
+  const sess = sessions().find(s => s.id === sessId);
+  return (sess && sess.home) || process.env.HOME || '/tmp';
+}
+
 const server = http.createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200,{'Content-Type':'application/json'});
     return res.end(JSON.stringify({ok:true}));
+  }
+
+  // ── /api/status ── ec 자체 상태 (splash/hello에서 polling 가능)
+  if (req.url === '/api/status') {
+    const pkg = readJsonSafe(path.join(__dirname, '..', 'package.json')) || {};
+    res.writeHead(200, {'Content-Type':'application/json'});
+    return res.end(JSON.stringify({
+      ok: true,
+      version: pkg.version || 'unknown',
+      port: PORT,
+      host: HOST,
+      sessions: sessions().map(s => ({
+        id: s.id, label: s.label,
+        alive: !!(ptyChannels.get(s.id)?.proc && ptyChannels.get(s.id).proc.exitCode === null),
+        signedInAs: ptyChannels.get(s.id)?.signedInAs || null,
+      })),
+    }));
+  }
+
+  // ── /api/slash/* ── claude TUI 슬래시 커맨드 상응물 ─────────────────────────
+  const slashMatch = req.url.match(/^\/api\/slash\/([a-z]+)(?:\?(.*))?$/);
+  if (slashMatch) {
+    const cmd = slashMatch[1];
+    const qs = new URLSearchParams(slashMatch[2] || '');
+    const sid = qs.get('sid');
+    const ch = sid ? ptyChannels.get(sid) : null;
+    res.writeHead(200, {'Content-Type':'application/json'});
+
+    // /status — 세션 메타 (model, cwd, session_id, tools, mcp_servers...)
+    if (cmd === 'status') {
+      if (!ch) return res.end(JSON.stringify({ok:false, error:'session not running', sid}));
+      return res.end(JSON.stringify({ok:true, session: ch.parser.snapshot().session}));
+    }
+    // /usage, /context — token usage (in/out/cache) 누적
+    if (cmd === 'usage' || cmd === 'context') {
+      if (!ch) return res.end(JSON.stringify({ok:false, error:'session not running', sid}));
+      const snap = ch.parser.snapshot();
+      return res.end(JSON.stringify({ok:true, usage: snap.session.usage, lastResult: ch.parser.lastResult, contextWindow: snap.session.contextWindow}));
+    }
+    // /stats — ~/.claude/stats-cache.json
+    if (cmd === 'stats') {
+      const home = sid ? homeDirOf(sid) : (process.env.HOME || '/tmp');
+      const stats = readJsonSafe(path.join(home, '.claude', 'stats-cache.json'));
+      return res.end(JSON.stringify({ok:true, stats}));
+    }
+    // /hooks — settings.json의 hooks 섹션
+    if (cmd === 'hooks') {
+      const home = sid ? homeDirOf(sid) : (process.env.HOME || '/tmp');
+      const settings = readJsonSafe(path.join(home, '.claude', 'settings.json')) || {};
+      return res.end(JSON.stringify({ok:true, hooks: settings.hooks || {}}));
+    }
+    // /agents — ~/.claude/agents/ 디렉토리 + settings agents
+    if (cmd === 'agents') {
+      const home = sid ? homeDirOf(sid) : (process.env.HOME || '/tmp');
+      const agentsDir = path.join(home, '.claude', 'agents');
+      const files = listDirSafe(agentsDir).filter(f => f.endsWith('.md') || f.endsWith('.json'));
+      const sessionAgents = ch ? (ch.parser.snapshot().session.agents || []) : [];
+      return res.end(JSON.stringify({ok:true, files, sessionAgents}));
+    }
+    // /tasks — .claude/tasks/ 디렉토리 (project-local)
+    if (cmd === 'tasks') {
+      const tasksDir = path.join(process.cwd(), '.claude', 'tasks');
+      const files = listDirSafe(tasksDir);
+      return res.end(JSON.stringify({ok:true, files, dir: tasksDir}));
+    }
+    // /doctor — 진단 (claude version, auth, mcp 상태)
+    if (cmd === 'doctor') {
+      const { spawnSync } = require('child_process');
+      const version = spawnSync('claude', ['--version'], {timeout: 3000, encoding:'utf8'}).stdout?.trim();
+      const auth = spawnSync('claude', ['auth', 'status', '--json'], {timeout: 5000, encoding:'utf8'}).stdout?.trim();
+      let authParsed = null;
+      try { authParsed = JSON.parse(auth); } catch {}
+      const sessSnap = ch ? ch.parser.snapshot().session : null;
+      return res.end(JSON.stringify({
+        ok: true,
+        claudeVersion: version,
+        auth: authParsed,
+        mcpServers: sessSnap?.mcpServers || [],
+        sessionId: sessSnap?.id || null,
+      }));
+    }
+    // /rename — POST body로 새 이름. (현재 cfg 세션 args 수정은 PoC에서 보류; session label 변경만 echo)
+    if (cmd === 'rename') {
+      if (req.method !== 'POST') return res.end(JSON.stringify({ok:false, error:'POST required'}));
+      return readJsonBody(req, (err, body) => {
+        if (err) return res.end(JSON.stringify({ok:false, error: err.message}));
+        const newName = body && body.name;
+        if (!sid || !newName) return res.end(JSON.stringify({ok:false, error:'sid + name required'}));
+        const sess = sessions().find(s => s.id === sid);
+        if (!sess) return res.end(JSON.stringify({ok:false, error:'session not found'}));
+        sessionState[sid] = { ...(sessionState[sid] || {}), name: newName };
+        saveState(sessionState);
+        return res.end(JSON.stringify({ok:true, sid, name:newName, note:'in-memory; full rename requires session respawn'}));
+      });
+    }
+    // /config — 기존 /api/claude-settings로 redirect (READ/WRITE 이미 있음)
+    if (cmd === 'config') {
+      return res.end(JSON.stringify({ok:true, redirect:'/api/claude-settings', hint:'use GET/PUT /api/claude-settings?home=<path>'}));
+    }
+    return res.end(JSON.stringify({ok:false, error:`unknown slash: ${cmd}`}));
   }
   if (req.url === '/api/sessions') {
     res.writeHead(200,{'Content-Type':'application/json'});
@@ -746,7 +891,7 @@ function spawnSession(sess) {
 
   const childEnv = {
     ...process.env,
-    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+    ...defaultClaudeEnv(),
     ...(injectedEnv || {}),
   };
   if (sess.home) childEnv.HOME = sess.home;
@@ -1021,9 +1166,34 @@ wss.on('connection', ws => {
       if (!att) return;
       const ch = ptyChannels.get(att.sessionId);
       if (!ch) return;
-      const text = msg.data;
+      let text = msg.data;
       if (!text || !text.trim()) return;
+      text = maybeBashShortcut(text);
       sendUserText(ch, text);
+      return;
+    }
+
+    if (op === 'interrupt') {
+      // claude TUI의 ESC (현재 turn 중단) 상응. stream-json control_request 발사.
+      // 출처: 비공식이나 reverse-engineering으로 확인된 control_request 프로토콜.
+      const att = wsChannels.get(id);
+      if (!att) return;
+      const ch = ptyChannels.get(att.sessionId);
+      if (!ch || !ch.proc || ch.proc.exitCode !== null) {
+        return send({ op: 'error', id, message: 'session not running' });
+      }
+      const requestId = `int-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+      const line = JSON.stringify({
+        type: 'control_request',
+        request_id: requestId,
+        request: { subtype: 'interrupt' },
+      }) + '\n';
+      try {
+        ch.proc.stdin.write(line);
+        send({ op: 'interrupt_sent', id, request_id: requestId });
+      } catch (e) {
+        send({ op: 'error', id, message: `interrupt write fail: ${e.message}` });
+      }
       return;
     }
 

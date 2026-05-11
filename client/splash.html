@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>easyclaude</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --bg: #faf7f2;
+    --fg: #2c2a25;
+    --accent: #e07856;
+    --muted: #8a8275;
+    --card: #fff;
+    --border: #ece6dc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1a1815; --fg:#e8e3d8; --accent:#e89678; --muted:#9a9080; --card:#252220; --border:#3a342e; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 32px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 48px 56px; max-width: 480px; width: 100%; box-shadow: 0 2px 24px rgba(0,0,0,0.04); }
+  h1 { margin: 0 0 8px 0; font-size: 28px; font-weight: 600; letter-spacing: -0.02em; }
+  .subtitle { color: var(--muted); margin: 0 0 32px 0; font-size: 14px; }
+  .status { display: flex; align-items: center; gap: 12px; padding: 16px; background: var(--bg); border-radius: 10px; margin-bottom: 16px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .label { font-size: 14px; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 24px; font-family: ui-monospace, monospace; }
+  .meta b { color: var(--fg); font-weight: 500; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>easyclaude</h1>
+    <p class="subtitle">Claude Code stream-json GUI</p>
+    <div class="status">
+      <div class="dot"></div>
+      <div class="label" id="status-label">로딩 중…</div>
+    </div>
+    <div class="meta" id="meta">—</div>
+    <p style="margin-top:24px"><a href="/">→ 콘솔 열기</a></p>
+  </div>
+</div>
+<script>
+async function refresh() {
+  try {
+    const r = await fetch('/api/status');
+    const j = await r.json();
+    document.getElementById('status-label').textContent = j.ok ? '준비됨' : '응답 없음';
+    const sessLines = (j.sessions||[]).map(s => `  ${s.id}: ${s.alive?'alive':'dormant'}${s.signedInAs?' ('+s.signedInAs+')':''}`).join('\n');
+    document.getElementById('meta').innerHTML = `<b>v${j.version}</b> @ ${j.host}:${j.port}<br>sessions:<br><pre style="margin:4px 0;font-size:11px">${sessLines||'(none)'}</pre>`;
+  } catch (e) {
+    document.getElementById('status-label').textContent = 'ec 미응답';
+  }
+}
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
