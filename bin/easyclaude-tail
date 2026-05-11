@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# easyclaude-tail <session-id-or-claude-uuid>
+#   easyclaude 세션의 jsonl 파일을 tail -f 합니다 (read-only, 안전).
+set -e
+SESS="$1"
+HOST="${EASYCLAUDE_HOST:-127.0.0.1}"
+PORT="${EASYCLAUDE_PORT:-7860}"
+if [ -z "$SESS" ]; then
+  echo "사용법: $0 <session-id-or-claude-uuid>"
+  echo "  session-id 가 활성 세션이면 API로 jsonl 경로를 조회합니다."
+  echo "  UUID(36자) 같으면 ~/.claude/projects/ 에서 직접 찾습니다."
+  exit 2
+fi
+# UUID 형태면 직접 검색
+if [[ "$SESS" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  F=$(find "$HOME/.claude/projects" -maxdepth 2 -name "$SESS.jsonl" -print -quit 2>/dev/null)
+  if [ -z "$F" ]; then echo "찾지 못함: $SESS"; exit 1; fi
+  exec tail -f "$F"
+fi
+# 활성 세션 API 조회
+RESP=$(curl -fsS "http://$HOST:$PORT/api/sessions/$SESS/jsonl-path" 2>/dev/null || true)
+PATH_VAL=$(echo "$RESP" | sed -n 's/.*"paths":\[\s*"\([^"]*\)".*/\1/p' | head -1)
+if [ -z "$PATH_VAL" ]; then
+  echo "세션 찾지 못함: $SESS"; echo "$RESP"; exit 1
+fi
+exec tail -f "$PATH_VAL"

@@ -1,52 +1,186 @@
 'use strict';
-/* easyclaude — client */
-window.onerror = (msg, src, line) => console.error(`[easyclaude] ${msg} ${src}:${line}`);
+// easyclaude 클라이언트 — stream-json turn 수신 + 텍스트 송신 + dialog modal.
 
-// ── Slash commands ────────────────────────────────────────────────────────────
-const SLASH_CMDS = [
-  { cmd: '/help',       desc: '사용 가능한 명령어 보기' },
-  { cmd: '/clear',      desc: '대화 기록 초기화' },
-  { cmd: '/compact',    desc: '컨텍스트 압축' },
-  { cmd: '/cost',       desc: '토큰 사용량 및 비용' },
-  { cmd: '/config',     desc: '설정 변경' },
-  { cmd: '/status',     desc: '현재 상태 확인' },
-  { cmd: '/memory',     desc: 'AI 기억 관리' },
-  { cmd: '/exit',       desc: '종료' },
-  { cmd: '/bug',        desc: '버그 리포트' },
-  { cmd: '/review',     desc: '코드 리뷰' },
-  { cmd: '/init',       desc: 'CLAUDE.md 초기화' },
-];
+const $ = id => document.getElementById(id);
+const $tabs = $('ec-tabs');
+const $parsed = $('ec-parsed-view');
+const $input = $('ec-input');
+const $send = $('ec-send-btn');
+const $interrupt = $('ec-interrupt-btn');
+const $restart = $('ec-restart-btn');
+const $usage = $('ec-usage');
+const $ham = $('ec-ham');
+const $nav = $('ec-nav');
+const $settingsBtn = $('ec-settings-btn');
+const $settings = $('ec-settings');
+const $settingsClose = $('ec-settings-close');
+const $status = $('ec-status');
+const $activeLabel = $('ec-active-label');
+const $ac = $('ec-autocomplete');
+const $dialog = $('ec-dialog');
+const $dialogTitle = $('ec-dialog-title');
+const $dialogBody = $('ec-dialog-body');
+const $dialogCancel = $('ec-dialog-cancel');
+const $dialogSubmit = $('ec-dialog-submit');
+const $dialogClose = $('ec-dialog-close');
+const $newSessionBtn = $('ec-new-session-btn');
+const $newSession = $('ec-newsession');
+const $newSessionClose = $('ec-newsession-close');
+const $newSessionCancel = $('ec-newsession-cancel');
+const $newSessionCreate = $('ec-newsession-create');
+const $nsLabel = $('ns-label');
+const $nsCwd = $('ns-cwd');
+const $nsName = $('ns-name');
+const $nsArgs = $('ns-args');
 
-// ── Themes ────────────────────────────────────────────────────────────────────
-const THEMES = {
-  dark:      { background:'#11111b', foreground:'#cdd6f4', cursor:'#f5e0dc', selectionBackground:'#585b70', black:'#45475a', red:'#f38ba8', green:'#a6e3a1', yellow:'#f9e2af', blue:'#89b4fa', magenta:'#f5c2e7', cyan:'#94e2d5', white:'#bac2de', brightBlack:'#585b70', brightRed:'#f38ba8', brightGreen:'#a6e3a1', brightYellow:'#f9e2af', brightBlue:'#89b4fa', brightMagenta:'#f5c2e7', brightCyan:'#94e2d5', brightWhite:'#a6adc8' },
-  light:     { background:'#eff1f5', foreground:'#4c4f69', cursor:'#dc8a78', selectionBackground:'#acb0be', black:'#5c5f77', red:'#d20f39', green:'#40a02b', yellow:'#df8e1d', blue:'#1e66f5', magenta:'#ea76cb', cyan:'#179299', white:'#acb0be', brightBlack:'#6c6f85', brightRed:'#d20f39', brightGreen:'#40a02b', brightYellow:'#df8e1d', brightBlue:'#1e66f5', brightMagenta:'#ea76cb', brightCyan:'#179299', brightWhite:'#bcc0cc' },
-  solarized: { background:'#002b36', foreground:'#839496', cursor:'#839496', selectionBackground:'#073642', black:'#073642', red:'#dc322f', green:'#859900', yellow:'#b58900', blue:'#268bd2', magenta:'#d33682', cyan:'#2aa198', white:'#eee8d5', brightBlack:'#002b36', brightRed:'#cb4b16', brightGreen:'#586e75', brightYellow:'#657b83', brightBlue:'#839496', brightMagenta:'#6c71c4', brightCyan:'#93a1a1', brightWhite:'#fdf6e3' },
-  monokai:   { background:'#272822', foreground:'#f8f8f2', cursor:'#f8f8f2', selectionBackground:'#75715e', black:'#272822', red:'#f92672', green:'#a6e22e', yellow:'#f4bf75', blue:'#66d9ef', magenta:'#ae81ff', cyan:'#a1efe4', white:'#f8f8f2', brightBlack:'#75715e', brightRed:'#f92672', brightGreen:'#a6e22e', brightYellow:'#f4bf75', brightBlue:'#66d9ef', brightMagenta:'#ae81ff', brightCyan:'#a1efe4', brightWhite:'#f9f8f5' },
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+// ── 설정 ──────────────────────────────────────────────────────────────────────
+const CFG_KEY = 'easyclaude.cfg';
+const cfg = Object.assign({
+  fontSize: 14,
+  theme: 'auto',              // mode: auto | light | dark
+  themePreset: 'default',     // default | philtoday | custom
+  logoPreset: 'default',      // default | philtoday | custom | none
+  titleText: '',              // override (빈 문자열이면 프리셋 기반)
+  customTheme: {},            // 커스텀 색상 토큰
+  customLogoSvg: '',          // 커스텀 로고 SVG 원문
+  customThemeMode: 'light',   // custom 테마 다크 여부 (light가 디폴트)
+  bypassEnabled: false,       // bypassPermissions 옵션 허용 여부 (위험 모드)
+}, (() => { try { return JSON.parse(localStorage.getItem(CFG_KEY) || '{}'); } catch { return {}; } })());
+
+function saveCfg() { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); applyCfg(); }
+
+const TITLE_DEFAULTS = {
+  default:   'easyclaude',
+  philtoday: 'PhilConsole',
+  custom:    'easyclaude',
 };
 
-// ── Config ────────────────────────────────────────────────────────────────────
-function loadCfg() { try { return JSON.parse(localStorage.getItem('easyclaude-cfg') || '{}'); } catch { return {}; } }
-function saveCfg(c) { localStorage.setItem('easyclaude-cfg', JSON.stringify(c)); }
-let cfg = { fontSize: 13, theme: 'dark', ...loadCfg() };
+// SVG 로고 — fetch로 가져옴 (logos/*.svg)
+const LOGO_CACHE = new Map();
+async function loadLogoSvg(name) {
+  if (LOGO_CACHE.has(name)) return LOGO_CACHE.get(name);
+  try {
+    const r = await fetch(apiBase() + 'logos/' + name + '.svg');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const svg = await r.text();
+    LOGO_CACHE.set(name, svg);
+    return svg;
+  } catch (e) {
+    console.warn('logo load fail', name, e.message);
+    return '';
+  }
+}
 
-// ── State ─────────────────────────────────────────────────────────────────────
-let ws = null, nextId = 0, activeId = null, cmdMode = true;
-let channels = new Map(); // id → { term, fitAddon, wrap, tab, sessionId, alive }
+async function applyCfg() {
+  // 1) 테마 프리셋
+  if (cfg.themePreset === 'default') {
+    document.body.removeAttribute('data-theme-preset');
+  } else {
+    document.body.setAttribute('data-theme-preset', cfg.themePreset);
+  }
+
+  // 2) 커스텀 색상 토큰 (custom일 때만 inline style로 주입, 그 외에는 정리)
+  const tokenKeys = ['bg','surface','surface-2','surface-3','border','border-strong',
+    'text','text-2','muted','accent','accent-2','accent-3','green','warn','danger','info'];
+  for (const k of tokenKeys) document.body.style.removeProperty('--' + k);
+  if (cfg.themePreset === 'custom' && cfg.customTheme) {
+    for (const [k, v] of Object.entries(cfg.customTheme)) {
+      if (v) document.body.style.setProperty('--' + k, v);
+    }
+  }
+
+  // 3) 다크/라이트 모드
+  if (cfg.themePreset === 'custom') {
+    document.body.dataset.theme = cfg.customThemeMode === 'dark' ? 'dark' : 'light';
+  } else {
+    document.body.dataset.theme = cfg.theme;
+  }
+
+  // 4) 폰트 크기
+  document.documentElement.style.setProperty('--ec-font-size', cfg.fontSize + 'px');
+
+  // 5) 타이틀 텍스트
+  const titleEl = $('ec-title');
+  if (titleEl) titleEl.textContent = cfg.titleText || TITLE_DEFAULTS[cfg.themePreset] || 'easyclaude';
+
+  // 6) 로고
+  const logoEl = $('ec-logo');
+  if (logoEl) {
+    if (cfg.logoPreset === 'none') logoEl.innerHTML = '';
+    else if (cfg.logoPreset === 'custom') logoEl.innerHTML = cfg.customLogoSvg || '';
+    else logoEl.innerHTML = await loadLogoSvg(cfg.logoPreset || 'default');
+  }
+
+  // 7) 설정 모달 input 동기화
+  const $fs = $('cfg-fontsize'), $fsV = $('cfg-fontsize-val'), $th = $('cfg-theme');
+  if ($fs)  { $fs.value = cfg.fontSize; }
+  if ($fsV) { $fsV.textContent = cfg.fontSize; }
+  if ($th)  { $th.value = cfg.theme; }
+  syncSettingsForm();
+}
+
+function syncSettingsForm() {
+  const set = (id, val) => { const el = $(id); if (el) el.value = val ?? ''; };
+  set('cfg-theme-preset', cfg.themePreset);
+  set('cfg-logo-preset',  cfg.logoPreset);
+  set('cfg-title-text',   cfg.titleText);
+  set('cfg-custom-svg',   cfg.customLogoSvg);
+  set('cfg-custom-mode',  cfg.customThemeMode);
+  const bypassEl = $('cfg-bypass-enabled');
+  if (bypassEl) bypassEl.checked = !!cfg.bypassEnabled;
+  for (const k of ['bg','surface','text','accent','border']) {
+    set('cfg-color-' + k, (cfg.customTheme && cfg.customTheme[k]) || '');
+  }
+  const customSection = $('ec-settings-custom');
+  if (customSection) customSection.classList.toggle('ec-hidden', cfg.themePreset !== 'custom');
+  const logoCustomSection = $('ec-settings-logo-custom');
+  if (logoCustomSection) logoCustomSection.classList.toggle('ec-hidden', cfg.logoPreset !== 'custom');
+}
+
+function renderPermPill() {
+  const pill = $('ec-perm-pill');
+  if (!pill) return;
+  const ch = activeChannel();
+  if (!ch) { pill.style.display = 'none'; return; }
+  const sess = ecSessions.find(s => s.id === ch.sessionId);
+  const ctrl = parseControlsFromArgs(sess?.args);
+  let mode = ctrl.permissionMode;
+  if (ctrl.permissionPromptTool) mode = 'prompt-tool';
+  pill.style.display = '';
+  const icons = {
+    default: '🔒', acceptEdits: '✏️', auto: '🤖',
+    bypassPermissions: '🔓', dontAsk: '🤫', plan: '📋', 'prompt-tool': '🤝',
+  };
+  pill.textContent = `${icons[mode] || '🔒'} ${mode}`;
+  pill.dataset.mode = mode;
+  pill.title = cfg.bypassEnabled
+    ? '클릭: bypassPermissions ↔ default 토글 (재기동)'
+    : '권한 모드 (위험 모드 비활성)';
+  pill.disabled = !cfg.bypassEnabled;
+  pill.classList.toggle('ec-perm-bypass', mode === 'bypassPermissions');
+}
+
+$('ec-perm-pill')?.addEventListener('click', () => {
+  if (!cfg.bypassEnabled) return;
+  const ch = activeChannel();
+  if (!ch) return;
+  const sess = ecSessions.find(s => s.id === ch.sessionId);
+  const ctrl = parseControlsFromArgs(sess?.args);
+  const cur = ctrl.permissionPromptTool ? 'prompt-tool' : ctrl.permissionMode;
+  const target = cur === 'bypassPermissions' ? 'default' : 'bypassPermissions';
+  if (!confirm(`권한 모드 ${cur} → ${target} 로 변경 (재기동)?`)) return;
+  const newArgs = patchArgs(sess?.args || [], { permissionMode: target });
+  sendWs({ op: 'restart', id: ch.id, args: newArgs });
+});
+
+// ── 상태 ──────────────────────────────────────────────────────────────────────
+let ws = null;
 let ecSessions = [];
-let acIdx = -1;
-
-// ── DOM ───────────────────────────────────────────────────────────────────────
-const $nav      = document.getElementById('ec-nav');
-const $tabs     = document.getElementById('ec-tabs');
-const $terms    = document.getElementById('ec-terms');
-const $keybar   = document.getElementById('ec-keybar');
-const $inputbar = document.getElementById('ec-inputbar');
-const $input    = document.getElementById('ec-input');
-const $send     = document.getElementById('ec-send-btn');
-const $ac       = document.getElementById('ec-autocomplete');
-const $modeBtn  = document.getElementById('ec-mode-btn');
-const $settings = document.getElementById('ec-settings');
+const channels = new Map();           // sessionId → { id, sessionId, label, turns, usage, session, alive, pendingDialog }
+let activeSid = null;
+let nextClientId = 1;
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connect() {
@@ -54,151 +188,643 @@ function connect() {
   const base  = location.pathname.replace(/[^/]*$/, '') || '/';
   ws = new WebSocket(`${proto}://${location.host}${base}`);
   ws.addEventListener('open', () => {
-    // 재연결 시 기존 채널 정리 (wrap은 DOM에 유지, 연결만 끊김 표시)
-    channels.forEach(ch => { ch.alive = false; ch.tab?.classList.remove('connected'); ch.tab?.classList.add('disconnected'); });
+    setStatus('connected', 'ok');
     channels.clear();
-    activeId = null;
+    activeSid = null;
     sendWs({ op: 'list' });
   });
-  ws.addEventListener('message', e  => onMsg(JSON.parse(e.data)));
-  ws.addEventListener('close',   () => setTimeout(connect, 2000));
-  ws.addEventListener('error',   () => {});
+  ws.addEventListener('message', e => onMsg(JSON.parse(e.data)));
+  ws.addEventListener('close', () => { setStatus('disconnected', 'err'); setTimeout(connect, 2000); });
+  ws.addEventListener('error', () => {});
 }
+function sendWs(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
 
-function sendWs(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+function setStatus(text, kind) {
+  $status.textContent = text;
+  $status.className = 'ec-parse-status' + (kind ? ' ec-status-' + kind : '');
 }
 
 function onMsg(msg) {
   const { op, id } = msg;
   if (op === 'sessions') {
     ecSessions = msg.list;
+    // 사라진 세션의 channel은 정리
+    for (const sid of [...channels.keys()]) {
+      if (!ecSessions.some(s => s.id === sid)) channels.delete(sid);
+    }
     renderTabs();
-    ecSessions.forEach(s => openSession(s.id));
     return;
   }
+  if (op === 'session_created') {
+    // 사용자가 + 버튼으로 만든 세션. 만든 직후 자동 활성화.
+    const sid = msg.sessionId;
+    setTimeout(() => {
+      if (!channels.has(sid)) openSession(sid);
+      activate(sid);
+    }, 100);
+    return;
+  }
+  if (op === 'session_deleted') {
+    channels.delete(msg.sessionId);
+    if (activeSid === msg.sessionId) activeSid = null;
+    refreshTabState();
+    return;
+  }
+  const ch = id != null ? [...channels.values()].find(c => c.id === id) : null;
   if (op === 'opened') {
-    const ch = channels.get(id);
-    if (ch) { ch.alive = true; ch.tab?.classList.add('connected'); }
+    if (ch) { ch.alive = true; ch.claudeId = msg.info?.claudeId; }
+    refreshTabState();
     return;
   }
-  if (op === 'output') {
-    const ch = channels.get(id);
-    if (ch) ch.term.write(msg.data);
+  if (op === 'turns') {
+    if (!ch) return;
+    ch.turns = msg.turns || [];
+    ch.usage = msg.usage || ch.usage;
+    // pendingInputs 중 서버 turns에 매칭되는 항목 제거 (echo 도착)
+    if (ch.pendingInputs?.length) {
+      ch.pendingInputs = ch.pendingInputs.filter(p =>
+        !ch.turns.some(t => t.type === 'human' && t.body === p.text)
+      );
+    }
+    if (ch.sessionId === activeSid) { renderActive(); renderUsage(); }
+    return;
+  }
+  if (op === 'system') {
+    if (ch) ch.session = msg.session;
+    if (ch && ch.sessionId === activeSid) renderUsage();
+    return;
+  }
+  if (op === 'usage') {
+    if (ch) ch.usage = msg.usage;
+    if (ch && ch.sessionId === activeSid) renderUsage();
+    return;
+  }
+  if (op === 'result') {
+    if (ch) ch.lastResult = msg.result;
+    return;
+  }
+  if (op === 'dialog') {
+    if (!ch) return;
+    ch.pendingDialog = { tool_use_id: msg.tool_use_id, kind: msg.kind, input: msg.input };
+    if (ch.sessionId === activeSid) showDialog(ch);
+    return;
+  }
+  if (op === 'hook') {
+    // 디버그용 — 일단 무시 (필요시 dev console)
     return;
   }
   if (op === 'closed') {
-    const ch = channels.get(id);
-    if (ch) { ch.alive = false; ch.tab?.classList.remove('connected'); ch.tab?.classList.add('disconnected'); }
+    if (ch) { ch.alive = false; }
+    refreshTabState();
+    return;
+  }
+  if (op === 'restarted') {
+    if (ch) {
+      ch.alive = !!msg.alive;
+      ch.claudeId = msg.claudeId;
+      // turns 는 reset 하지 않음 — 서버가 영속 (--resume) + 새 system 이벤트로 갱신될 것
+      ch.pendingDialog = null;
+    }
+    refreshTabState();
+    renderActive();
+    renderPermPill();
+    return;
+  }
+  if (op === 'error') {
+    console.error('[easyclaude]', msg.message);
     return;
   }
 }
 
-// ── Tabs ──────────────────────────────────────────────────────────────────────
+// ── 탭 ──────────────────────────────────────────────────────────────────────────
+// ── 탭 선호도 (pin / group / order) — localStorage 영속 ───────────────────────
+const TABPREFS_KEY = 'easyclaude.tabPrefs';
+const tabPrefs = (() => {
+  try { return JSON.parse(localStorage.getItem(TABPREFS_KEY) || '{}'); }
+  catch { return {}; }
+})();
+function saveTabPrefs() {
+  localStorage.setItem(TABPREFS_KEY, JSON.stringify(tabPrefs));
+}
+function getTabPref(sid) {
+  return tabPrefs[sid] || {};
+}
+function setTabPref(sid, patch) {
+  tabPrefs[sid] = { ...(tabPrefs[sid] || {}), ...patch };
+  // null 값은 제거
+  for (const [k, v] of Object.entries(tabPrefs[sid])) {
+    if (v === null || v === undefined || v === '') delete tabPrefs[sid][k];
+  }
+  if (!Object.keys(tabPrefs[sid]).length) delete tabPrefs[sid];
+  saveTabPrefs();
+  renderTabs();
+}
+
+// 그룹 접기 상태 (메모리만)
+const collapsedGroups = new Set();
+
+function tabSortKey(s, prefs) {
+  // pin 우선, pin 안에서는 pinOrder, 같으면 label
+  const p = prefs[s.id] || {};
+  return {
+    pinned: p.pinned ? 0 : 1,
+    pinOrder: p.pinOrder ?? 99999,
+    group: p.group || '',
+    label: s.label || s.id,
+  };
+}
+
 function renderTabs() {
   $tabs.innerHTML = '';
-  ecSessions.forEach(s => {
-    const btn = document.createElement('button');
-    btn.className = 'ec-tab';
-    btn.dataset.sid = s.id;
-    btn.innerHTML = `<span class="ec-dot"></span>${esc(s.label)}`;
-    btn.addEventListener('click', () => { activate(s.id); $nav.classList.remove('open'); });
-    $tabs.appendChild(btn);
-    const ch = [...channels.values()].find(c => c.sessionId === s.id);
-    if (ch) ch.tab = btn;
+  // 1) 정렬: pin / group / label
+  const sorted = [...ecSessions].sort((a, b) => {
+    const ka = tabSortKey(a, tabPrefs);
+    const kb = tabSortKey(b, tabPrefs);
+    if (ka.pinned !== kb.pinned) return ka.pinned - kb.pinned;
+    if (ka.pinned === 0) {
+      if (ka.pinOrder !== kb.pinOrder) return ka.pinOrder - kb.pinOrder;
+    }
+    if (ka.group !== kb.group) {
+      if (!ka.group) return 1;
+      if (!kb.group) return -1;
+      return ka.group.localeCompare(kb.group);
+    }
+    return ka.label.localeCompare(kb.label);
+  });
+  // 2) 섹션: pinned 블록 + group별 블록 + 나머지
+  const pinned = sorted.filter(s => tabPrefs[s.id]?.pinned);
+  const rest = sorted.filter(s => !tabPrefs[s.id]?.pinned);
+  if (pinned.length) {
+    appendTabSection('📌 고정', pinned, '__pinned__');
+  }
+  // group별로 묶기
+  const groups = new Map();
+  for (const s of rest) {
+    const g = tabPrefs[s.id]?.group || '';
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(s);
+  }
+  // 그룹 있는 것 먼저, 빈 그룹은 마지막
+  const groupNames = [...groups.keys()].filter(g => g);
+  for (const g of groupNames) {
+    appendTabSection(g, groups.get(g), g);
+  }
+  const ungrouped = groups.get('') || [];
+  if (ungrouped.length) {
+    appendTabSection(pinned.length || groupNames.length ? '기타' : null, ungrouped, '__ungrouped__');
+  }
+  refreshTabState();
+}
+
+function appendTabSection(headerLabel, items, groupKey) {
+  if (headerLabel) {
+    const isCollapsed = collapsedGroups.has(groupKey);
+    const header = document.createElement('div');
+    header.className = 'ec-tab-group-header';
+    header.innerHTML = `<span class="ec-group-caret">${isCollapsed ? '▸' : '▾'}</span>` +
+      `<span class="ec-group-name">${esc(headerLabel)}</span>` +
+      `<span class="ec-group-count">${items.length}</span>`;
+    header.addEventListener('click', () => {
+      if (collapsedGroups.has(groupKey)) collapsedGroups.delete(groupKey);
+      else collapsedGroups.add(groupKey);
+      renderTabs();
+    });
+    $tabs.appendChild(header);
+    if (isCollapsed) return;
+  }
+  for (const s of items) {
+    $tabs.appendChild(createTabElement(s));
+  }
+}
+
+function createTabElement(s) {
+  const btn = document.createElement('button');
+  btn.className = 'ec-tab';
+  btn.dataset.sid = s.id;
+  const pref = tabPrefs[s.id] || {};
+  const pinIcon = pref.pinned ? '📌' : '';
+  btn.innerHTML = `<span class="ec-dot"></span>` +
+    (pinIcon ? `<span class="ec-tab-pin">${pinIcon}</span>` : '') +
+    `<span class="ec-tab-label">${esc(s.label)}</span>` +
+    `<span class="ec-tab-menu" title="옵션">⋮</span>` +
+    `<span class="ec-tab-x" title="${s.meta?.adhoc ? '영구 삭제' : '닫기'}">✕</span>`;
+  btn.addEventListener('click', e => {
+    if (e.target.classList.contains('ec-tab-x')) {
+      e.stopPropagation();
+      return handleTabClose(s);
+    }
+    if (e.target.classList.contains('ec-tab-menu')) {
+      e.stopPropagation();
+      return showTabMenu(s, btn);
+    }
+    if (!channels.has(s.id)) openSession(s.id);
+    activate(s.id);
+    $nav.classList.remove('open');
+  });
+  return btn;
+}
+
+function showTabMenu(s, anchor) {
+  // 기존 메뉴 닫기
+  document.querySelectorAll('.ec-tab-popup').forEach(el => el.remove());
+  const rect = anchor.getBoundingClientRect();
+  const pref = tabPrefs[s.id] || {};
+  const menu = document.createElement('div');
+  menu.className = 'ec-tab-popup';
+  menu.style.left = rect.right + 'px';
+  menu.style.top = rect.top + 'px';
+  menu.innerHTML = `
+    <button data-act="pin">${pref.pinned ? '📌 고정 해제' : '📌 고정'}</button>
+    ${pref.pinned ? `<button data-act="pin-up">▲ 위로</button>
+                     <button data-act="pin-down">▼ 아래로</button>` : ''}
+    <button data-act="group">📂 그룹 설정…</button>
+    <button data-act="restart">↻ 재기동</button>
+  `;
+  document.body.appendChild(menu);
+  const close = () => menu.remove();
+  setTimeout(() => document.addEventListener('click', close, { once: true }), 0);
+  menu.addEventListener('click', e => {
+    const act = e.target.dataset.act;
+    if (!act) return;
+    if (act === 'pin') {
+      const newPinned = !pref.pinned;
+      const patch = { pinned: newPinned };
+      if (newPinned) {
+        // 새 pin은 맨 뒤 순서로
+        const maxOrder = Math.max(0, ...Object.values(tabPrefs).map(p => p.pinOrder || 0));
+        patch.pinOrder = maxOrder + 1;
+      } else {
+        patch.pinOrder = null;
+      }
+      setTabPref(s.id, patch);
+    } else if (act === 'pin-up' || act === 'pin-down') {
+      // pinned 탭들의 순서 교환
+      const pinned = ecSessions
+        .filter(x => tabPrefs[x.id]?.pinned)
+        .sort((a, b) => (tabPrefs[a.id].pinOrder || 0) - (tabPrefs[b.id].pinOrder || 0));
+      const idx = pinned.findIndex(x => x.id === s.id);
+      const target = act === 'pin-up' ? idx - 1 : idx + 1;
+      if (target < 0 || target >= pinned.length) { close(); return; }
+      const otherSid = pinned[target].id;
+      const a = tabPrefs[s.id].pinOrder;
+      tabPrefs[s.id].pinOrder = tabPrefs[otherSid].pinOrder;
+      tabPrefs[otherSid].pinOrder = a;
+      saveTabPrefs();
+      renderTabs();
+    } else if (act === 'group') {
+      const cur = pref.group || '';
+      const ans = prompt('그룹 이름 (비우면 그룹 해제):', cur);
+      if (ans === null) { close(); return; }
+      setTabPref(s.id, { group: ans.trim() || null });
+    } else if (act === 'restart') {
+      if (!confirm(`'${s.label}' 세션을 재기동할까요? (claudeId 보존)`)) { close(); return; }
+      const ch = channels.get(s.id);
+      if (ch) sendWs({ op:'restart', id: ch.id });
+    }
+    close();
+  });
+}
+
+function handleTabClose(s) {
+  const ch = channels.get(s.id);
+  const isAlive = ch && ch.alive;
+  if (isAlive) {
+    if (!confirm(`'${s.label}'은 실행 중입니다. 강제로 영구 삭제할까요?\n(jsonl 파일까지 제거)`)) return;
+  } else {
+    if (!confirm(`'${s.label}' 세션을 목록에서 영구 제거할까요?\n(jsonl 파일까지 제거)`)) return;
+  }
+  sendWs({ op: 'purge_session', id: nextClientId++, sessionId: s.id });
+}
+
+function refreshTabState() {
+  document.querySelectorAll('.ec-tab').forEach(t => {
+    const sid = t.dataset.sid;
+    const ch = channels.get(sid);
+    t.classList.toggle('active', sid === activeSid);
+    t.classList.toggle('connected', !!(ch && ch.alive));
+    t.classList.toggle('disconnected', !!(ch && !ch.alive));
   });
 }
 
 function activate(sessionId) {
-  const ch = [...channels.values()].find(c => c.sessionId === sessionId);
-  if (!ch) return;
-  activeId = ch.id;
-  channels.forEach(c => c.wrap.classList.remove('active'));
-  ch.wrap.classList.add('active');
-  document.querySelectorAll('.ec-tab').forEach(t => t.classList.remove('active'));
-  ch.tab?.classList.add('active');
-  requestAnimationFrame(() => { ch.fitAddon.fit(); sendWs({ op:'resize', id:ch.id, cols:ch.term.cols, rows:ch.term.rows }); if (cmdMode) $input.focus(); else ch.term.focus(); });
+  if (!channels.has(sessionId)) return;
+  activeSid = sessionId;
+  const ch = channels.get(sessionId);
+  if ($activeLabel) $activeLabel.textContent = ch?.label || '';
+  refreshTabState();
+  renderActive();
+  renderUsage();
+  renderPermPill();
+  if (ch?.pendingDialog) showDialog(ch);
+  else hideDialog();
+  requestAnimationFrame(() => $input.focus());
 }
-
-// ── Terminal ──────────────────────────────────────────────────────────────────
-// 세션별 터미널 인스턴스 캐시 (WS 재연결 시 재사용)
-const termCache = new Map(); // sessionId → { term, fitAddon, wrap }
 
 function openSession(sessionId) {
-  const id = nextId++;
-
-  // 기존 터미널 재사용 또는 새로 생성
-  let cached = termCache.get(sessionId);
-  let term, fitAddon, wrap;
-  if (cached) {
-    ({ term, fitAddon, wrap } = cached);
-  } else {
-    term = new Terminal({
-      fontSize: cfg.fontSize,
-      fontFamily: "'JetBrains Mono', 'Cascadia Code', monospace",
-      theme: THEMES[cfg.theme] || THEMES.dark,
-      allowProposedApi: true,
-      scrollback: 10000,
-      macOptionIsMeta: true,
-    });
-    fitAddon = new FitAddon.FitAddon();
-    term.loadAddon(fitAddon);
-    term.loadAddon(new WebLinksAddon.WebLinksAddon());
-    wrap = document.createElement('div');
-    wrap.className = 'ec-term-wrap';
-    $terms.appendChild(wrap);
-    term.open(wrap);
-    fitAddon.fit();
-    termCache.set(sessionId, { term, fitAddon, wrap });
-  }
-
-  // INT 모드 전용: 직접 키입력 → 서버 (신규 생성 시에만 등록)
-  if (!cached) {
-    term.attachCustomKeyEventHandler(() => !cmdMode);
-    term.onData(data => { if (!cmdMode) { const ch2 = [...channels.values()].find(c=>c.sessionId===sessionId); if(ch2) sendWs({ op:'input', id:ch2.id, data }); } });
-  }
-
-  const tabEl = $tabs.querySelector(`[data-sid="${sessionId}"]`);
-  channels.set(id, { id, sessionId, term, fitAddon, wrap, tab: tabEl, alive: false });
-
-  const ro = new ResizeObserver(() => {
-    if (!wrap.classList.contains('active')) return;
-    fitAddon.fit();
-    sendWs({ op:'resize', id, cols: term.cols, rows: term.rows });
+  if (channels.has(sessionId)) return;
+  const id = nextClientId++;
+  const meta = ecSessions.find(s => s.id === sessionId);
+  channels.set(sessionId, {
+    id, sessionId,
+    label: meta?.label || sessionId,
+    alive: false,
+    turns: [],
+    pendingInputs: [],  // optimistic 사용자 메시지 (서버 echo 도착 전 표시)
+    usage: null,
+    session: null,
+    pendingDialog: null,
   });
-  ro.observe(wrap);
-
-  sendWs({ op:'open', id, sessionId });
-  if (channels.size === 1) activate(sessionId);
+  sendWs({ op: 'open', id, sessionId });
 }
 
-// ── Input & Autocomplete ─────────────────────────────────────────────────────
-function sendInput() {
-  const val = $input.value.trim();
-  if (!val) return;
-  const ch = activeId !== null ? channels.get(activeId) : null;
-  if (ch) {
-    sendWs({ op:'input', id: ch.id, data: val });
-    // send-keys 완료 후 Enter (서버에서 비동기 처리됨)
-    // 서버 청크 전송 완료 후 Enter: (청크 수 × 12ms) + 여유 50ms
-    const enterDelay = Math.ceil(val.length / 20) * 12 + 50;
-    setTimeout(() => sendWs({ op:'input', id: ch.id, data: '\r' }), enterDelay);
+// ── 렌더 ──────────────────────────────────────────────────────────────────────
+const LABELS = {
+  human:'You', assistant:'Claude',
+  tool_call:'Tool', tool_out:'Result',
+  thinking:'Thinking', other:'…',
+};
+const COLORS = {
+  human:'var(--accent)', assistant:'var(--green)',
+  tool_call:'#cba6f7', tool_out:'#f9e2af',
+  thinking:'#74c7ec', other:'var(--muted)',
+};
+
+function renderActive() {
+  if (!activeSid) {
+    $parsed.innerHTML = `
+      <div class="ec-welcome">
+        <div class="ec-welcome-logo" id="ec-welcome-logo" aria-hidden="true"></div>
+        <h2 class="ec-welcome-title">easyclaude</h2>
+        <p class="ec-welcome-sub">왼쪽 사이드바에서 세션을 선택하거나, <b>＋ 새 세션</b>으로 시작하세요.</p>
+        <ul class="ec-welcome-tips">
+          <li><b>＋ 새 세션</b> — 작업 디렉터리 / 모델 / 권한 모드 등 선택해 spawn</li>
+          <li><b>기존 부활</b> — 과거 세션 검색해서 <code>--resume</code> 으로 부활</li>
+          <li><b>탭 ⋮</b> — 고정 / 그룹 / 재기동</li>
+          <li><b>ⓘ</b> — 활성 세션 정보 + 모델/권한 변경 (재기동)</li>
+        </ul>
+      </div>`;
+    // welcome 영역에 로고 inject
+    const logoSlot = $('ec-welcome-logo');
+    if (logoSlot && $('ec-logo')) logoSlot.innerHTML = $('ec-logo').innerHTML;
+    return;
   }
+  const ch = channels.get(activeSid);
+  if (!ch) { $parsed.innerHTML = ''; return; }
+  const turns = ch.turns || [];
+  const pending = ch.pendingInputs || [];
+  if (!turns.length && !pending.length) {
+    $parsed.innerHTML = '<div class="ec-empty">출력 대기 중…</div>';
+    return;
+  }
+  const wasAtBottom = $parsed.scrollTop + $parsed.clientHeight + 80 >= $parsed.scrollHeight;
+  const turnsHtml = turns.map(t => {
+    const cls = `ec-turn ec-turn-${t.type}` + (t.is_error ? ' ec-error' : '');
+    return `
+      <div class="${cls}">
+        <div class="ec-turn-label" style="color:${COLORS[t.type]||'var(--muted)'}">${esc(LABELS[t.type] || t.type)}</div>
+        <div class="ec-turn-body ${t.type}">${esc(t.body)}</div>
+      </div>`;
+  }).join('');
+  const pendingHtml = pending.map(p => `
+    <div class="ec-turn ec-turn-human ec-turn-pending">
+      <div class="ec-turn-label" style="color:${COLORS.human}">You · 전송 중…</div>
+      <div class="ec-turn-body human">${esc(p.text)}</div>
+    </div>`).join('');
+  $parsed.innerHTML = turnsHtml + pendingHtml;
+  if (wasAtBottom) $parsed.scrollTop = $parsed.scrollHeight;
+}
+
+function fmtNum(n) { return (n || 0).toLocaleString(); }
+function renderUsage() {
+  const ch = activeChannel();
+  if (!ch) { $usage.textContent = ''; return; }
+  const u = ch.usage;
+  const s = ch.session || {};
+  const model = s.model || '';
+  const mcpBad = (s.mcpServers || []).filter(m => m.status && m.status !== 'connected' && m.status !== 'needs-auth').length;
+  const mcpAuth = (s.mcpServers || []).filter(m => m.status === 'needs-auth').length;
+  let mcp = '';
+  if (s.mcpServers?.length) {
+    const ok = s.mcpServers.length - mcpBad - mcpAuth;
+    mcp = ` · MCP ${ok}/${s.mcpServers.length}`;
+    if (mcpBad) mcp += ` ✕${mcpBad}`;
+    if (mcpAuth) mcp += ` ⚠${mcpAuth}`;
+  }
+  if (!u) { $usage.textContent = model + mcp; return; }
+  const total = (u.input || 0) + (u.output || 0) + (u.cache_read || 0);
+  $usage.textContent = `${model} · ${fmtNum(total)} tok${mcp}`;
+  $usage.title = `in: ${fmtNum(u.input)} / out: ${fmtNum(u.output)} / cache_read: ${fmtNum(u.cache_read)} / cache_create: ${fmtNum(u.cache_creation)}\n${(s.mcpServers||[]).map(m=>`${m.name}: ${m.status}`).join('\n')}`;
+}
+
+// ── 입력 ──────────────────────────────────────────────────────────────────────
+function activeChannel() { return activeSid ? channels.get(activeSid) : null; }
+function sendInput() {
+  const val = $input.value;
+  if (!val || !val.trim()) return;
+  const ch = activeChannel();
+  if (!ch) return;
+  sendWs({ op:'input', id: ch.id, data: val });
+  // optimistic 풍선 — echo 도착 전 즉시 표시
+  ch.pendingInputs = ch.pendingInputs || [];
+  ch.pendingInputs.push({ text: val, sentAt: Date.now() });
   $input.value = '';
+  autosize();
   hideAc();
+  if (ch.sessionId === activeSid) renderActive();
   requestAnimationFrame(() => $input.focus());
+}
+function autosize() {
+  $input.style.height = 'auto';
+  // 2줄(56px) 이하면 그대로 두고, 그 이상 입력 시 scrollHeight 만큼 (최대 200px)
+  const target = Math.max(56, Math.min($input.scrollHeight, 200));
+  $input.style.height = target + 'px';
 }
 
 $send.addEventListener('click', sendInput);
 $input.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); if (acIdx >= 0) fillAc(acIdx); else sendInput(); return; }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    if (acIdx >= 0) fillAc(acIdx);
+    else sendInput();
+    return;
+  }
   if (e.key === 'ArrowDown') { e.preventDefault(); moveAc(1); return; }
   if (e.key === 'ArrowUp')   { e.preventDefault(); moveAc(-1); return; }
   if (e.key === 'Escape')    { hideAc(); return; }
 });
-$input.addEventListener('input', updateAc);
+$input.addEventListener('input', () => { autosize(); updateAc(); });
 
-// Autocomplete
+$interrupt.addEventListener('click', () => {
+  const ch = activeChannel();
+  if (!ch) return;
+  sendWs({ op:'interrupt', id: ch.id });
+});
+$restart.addEventListener('click', () => {
+  const ch = activeChannel();
+  if (!ch) return;
+  if (!confirm(`${ch.label} 세션을 재기동할까요? (claudeId 보존 → --resume)`)) return;
+  sendWs({ op:'restart', id: ch.id });
+});
+
+// ── Dialog (AskUserQuestion) ──────────────────────────────────────────────────
+let currentDialog = null; // { ch, tool_use_id, kind, input, answers }
+
+function showDialog(ch) {
+  if (!ch.pendingDialog) return;
+  const d = ch.pendingDialog;
+  currentDialog = { ch, ...d, answers: {} };
+  if (d.kind === 'PermissionPrompt') return renderPermissionDialog(d);
+  return renderAskUserQuestionDialog(d);
+}
+
+function renderPermissionDialog(d) {
+  $dialogTitle.textContent = '권한 확인';
+  const toolName = d.input?.tool_name || d.tool_name || '(unknown)';
+  const toolInput = d.input?.input ?? d.input ?? {};
+  $dialogBody.innerHTML = `
+    <div class="ec-perm-tool">
+      <div class="ec-perm-toolname">${esc(toolName)}</div>
+      <pre class="ec-perm-input">${esc(JSON.stringify(toolInput, null, 2))}</pre>
+    </div>
+    <label class="ec-field">
+      <span>수정된 입력 (선택, JSON — 비우면 원본 사용)</span>
+      <textarea id="perm-updated" rows="4" placeholder="비우면 원본 그대로 허용"></textarea>
+    </label>
+    <label class="ec-field">
+      <span>메모 (선택)</span>
+      <input id="perm-message" type="text" placeholder="claude에 전달될 짧은 메모">
+    </label>
+  `;
+  // submit 버튼 라벨 변경
+  $dialogSubmit.textContent = '허용';
+  $dialogCancel.textContent = '거부';
+  setTimeout(() => $dialogBody.querySelector('#perm-updated')?.focus(), 50);
+  $dialog.classList.remove('ec-hidden');
+}
+
+function renderAskUserQuestionDialog(d) {
+  const questions = (d.input?.questions || []);
+  $dialogTitle.textContent = '질문';
+  $dialogSubmit.textContent = '전송';
+  $dialogCancel.textContent = '취소';
+  $dialogBody.innerHTML = questions.map((q, i) => {
+    const header = q.header ? `<span class="ec-dialog-header-chip">${esc(q.header)}</span>` : '';
+    const opts = (q.options || []).map((opt, oi) => {
+      const inputType = q.multiSelect ? 'checkbox' : 'radio';
+      const inputName = `dlg-q-${i}`;
+      return `
+        <label class="ec-dialog-opt">
+          <input type="${inputType}" name="${inputName}" value="${esc(opt.label)}" data-qidx="${i}">
+          <div class="ec-dialog-opt-text">
+            <div class="ec-dialog-opt-label">${esc(opt.label)}</div>
+            ${opt.description ? `<div class="ec-dialog-opt-desc">${esc(opt.description)}</div>` : ''}
+          </div>
+        </label>`;
+    }).join('');
+    const otherInput = `
+      <label class="ec-dialog-opt ec-dialog-opt-other">
+        <input type="${q.multiSelect ? 'checkbox' : 'radio'}" name="dlg-q-${i}" value="__other__" data-qidx="${i}">
+        <div class="ec-dialog-opt-text">
+          <div class="ec-dialog-opt-label">기타</div>
+          <input type="text" class="ec-dialog-opt-other-input" data-qidx="${i}" placeholder="직접 입력…">
+        </div>
+      </label>`;
+    return `
+      <div class="ec-dialog-question" data-qidx="${i}">
+        <div class="ec-dialog-question-head">${header}${esc(q.question)}</div>
+        <div class="ec-dialog-options">${opts}${otherInput}</div>
+      </div>`;
+  }).join('');
+  $dialog.classList.remove('ec-hidden');
+  const first = $dialogBody.querySelector('input[type=radio],input[type=checkbox]');
+  first?.focus();
+}
+
+function collectPermissionResponse(allow) {
+  const d = currentDialog;
+  if (!d) return null;
+  const out = { tool_use_id: d.tool_use_id, behavior: allow ? 'allow' : 'deny' };
+  if (allow) {
+    const txt = $dialogBody.querySelector('#perm-updated')?.value?.trim();
+    if (txt) {
+      try { out.updatedInput = JSON.parse(txt); }
+      catch (e) { return { error: 'updatedInput JSON 파싱 실패: ' + e.message }; }
+    }
+  }
+  const msg = $dialogBody.querySelector('#perm-message')?.value?.trim();
+  if (msg) out.message = msg;
+  return out;
+}
+
+function hideDialog() {
+  $dialog.classList.add('ec-hidden');
+  currentDialog = null;
+}
+
+function collectDialogAnswers() {
+  const d = currentDialog;
+  if (!d) return null;
+  const questions = d.input?.questions || [];
+  const answers = {};
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    const inputs = $dialogBody.querySelectorAll(`input[name="dlg-q-${i}"]`);
+    const selected = [];
+    for (const el of inputs) {
+      if (!el.checked) continue;
+      let val = el.value;
+      if (val === '__other__') {
+        const other = $dialogBody.querySelector(`.ec-dialog-opt-other-input[data-qidx="${i}"]`);
+        val = other?.value?.trim() || '';
+        if (!val) continue;
+      }
+      selected.push(val);
+    }
+    if (!selected.length) return { error: `질문 ${i+1}에 답이 필요합니다` };
+    answers[q.question] = q.multiSelect ? selected : selected[0];
+  }
+  return { answers };
+}
+
+$dialogSubmit.addEventListener('click', () => {
+  if (!currentDialog) return;
+  const { ch, tool_use_id, kind } = currentDialog;
+  if (kind === 'PermissionPrompt') {
+    const r = collectPermissionResponse(true);
+    if (r.error) { alert(r.error); return; }
+    sendWs({ op:'permission_response', id: ch.id, ...r });
+  } else {
+    const r = collectDialogAnswers();
+    if (r.error) { alert(r.error); return; }
+    sendWs({ op:'dialog_response', id: ch.id, tool_use_id, answers: r.answers });
+  }
+  ch.pendingDialog = null;
+  hideDialog();
+});
+$dialogCancel.addEventListener('click', () => {
+  if (!currentDialog) return;
+  const { ch, tool_use_id, kind } = currentDialog;
+  if (kind === 'PermissionPrompt') {
+    sendWs({ op:'permission_response', id: ch.id, tool_use_id, behavior: 'deny' });
+  } else {
+    sendWs({ op:'dialog_response', id: ch.id, tool_use_id, cancelled: true });
+  }
+  ch.pendingDialog = null;
+  hideDialog();
+});
+$dialogClose.addEventListener('click', () => $dialogCancel.click());
+
+// ── Autocomplete (슬래시 커맨드) ──────────────────────────────────────────────
+// stream-json 모드에서는 슬래시 커맨드가 대부분 비활성. 일반적인 텍스트로 전달됨.
+// /clear, /compact 등 일부만 실제 효과. 일단 보존.
+const SLASH_CMDS = [
+  { cmd: '/clear',    desc: '대화 초기화' },
+  { cmd: '/compact',  desc: '대화 압축' },
+  { cmd: '/model',    desc: '모델 변경' },
+  { cmd: '/agents',   desc: '에이전트 관리' },
+  { cmd: '/mcp',      desc: 'MCP 서버 관리' },
+];
+let acIdx = -1;
 function updateAc() {
   const v = $input.value;
   if (!v.startsWith('/')) { hideAc(); return; }
@@ -210,15 +836,13 @@ function updateAc() {
     `<div class="ec-ac-item" data-i="${i}">
        <span class="ec-ac-cmd">${esc(c.cmd)}</span>
        <span class="ec-ac-desc">${esc(c.desc)}</span>
-     </div>`
-  ).join('');
+     </div>`).join('');
   $ac.querySelectorAll('.ec-ac-item').forEach((el, i) => {
     el.addEventListener('pointerdown', e => { e.preventDefault(); fillAc(i, matches); });
   });
   $ac.classList.remove('ec-hidden');
   $ac._matches = matches;
 }
-
 function moveAc(dir) {
   const items = $ac.querySelectorAll('.ec-ac-item');
   if (!items.length) return;
@@ -226,489 +850,511 @@ function moveAc(dir) {
   acIdx = Math.max(-1, Math.min(items.length - 1, acIdx + dir));
   items[acIdx]?.classList.add('selected');
 }
-
 function fillAc(i, matches) {
-  const m = (matches || $ac._matches || [])[i];
-  if (m) { $input.value = m.cmd + ' '; $input.focus(); }
+  matches = matches || $ac._matches || [];
+  if (!matches[i]) return;
+  $input.value = matches[i].cmd + ' ';
   hideAc();
+  $input.focus();
 }
+function hideAc() { acIdx = -1; $ac.classList.add('ec-hidden'); $ac.innerHTML = ''; }
 
-function hideAc() { $ac.classList.add('ec-hidden'); acIdx = -1; }
-
-// ── Key bar ───────────────────────────────────────────────────────────────────
-$keybar.querySelectorAll('button[data-seq]').forEach(btn => {
-  btn.addEventListener('pointerdown', e => {
-    e.preventDefault();
-    const ch = activeId !== null ? channels.get(activeId) : null;
-    if (!ch) return;
-    sendWs({ op:'input', id: ch.id, data: parseSeq(btn.dataset.seq) });
-    if (cmdMode) $input.focus(); else ch.term.focus();
+// ── 사이드바 / 설정 ───────────────────────────────────────────────────────────
+$ham?.addEventListener('click', () => $nav.classList.toggle('open'));
+$settingsBtn?.addEventListener('click', () => $settings.classList.remove('ec-hidden'));
+$settingsClose?.addEventListener('click', () => $settings.classList.add('ec-hidden'));
+$('cfg-fontsize')?.addEventListener('input', e => { cfg.fontSize = +e.target.value; saveCfg(); });
+$('cfg-theme')?.addEventListener('change', e => { cfg.theme = e.target.value; saveCfg(); });
+$('cfg-theme-preset')?.addEventListener('change', e => { cfg.themePreset = e.target.value; saveCfg(); });
+$('cfg-logo-preset')?.addEventListener('change', e => { cfg.logoPreset = e.target.value; saveCfg(); });
+$('cfg-title-text')?.addEventListener('input', e => { cfg.titleText = e.target.value; saveCfg(); });
+$('cfg-custom-mode')?.addEventListener('change', e => { cfg.customThemeMode = e.target.value; saveCfg(); });
+$('cfg-custom-svg')?.addEventListener('input', e => { cfg.customLogoSvg = e.target.value; saveCfg(); });
+$('cfg-bypass-enabled')?.addEventListener('change', e => { cfg.bypassEnabled = e.target.checked; saveCfg(); renderPermPill(); });
+['bg','surface','text','accent','border'].forEach(k => {
+  $('cfg-color-' + k)?.addEventListener('input', e => {
+    if (!cfg.customTheme) cfg.customTheme = {};
+    cfg.customTheme[k] = e.target.value;
+    saveCfg();
   });
 });
+$('cfg-reset')?.addEventListener('click', () => {
+  if (!confirm('모든 설정을 기본값으로 되돌릴까요?')) return;
+  localStorage.removeItem(CFG_KEY);
+  location.reload();
+});
 
-// ── Buffer Parser ─────────────────────────────────────────────────────────────
-const $parsedView  = document.getElementById('ec-parsed-view');
-const $parseStatus = document.getElementById('ec-parse-status');
-let parsedMode = false;
-let _parseTimer = null;
-
-// ── 색상 샘플러 (개발용) ──────────────────────────────────────────────────────
-function sampleColors(term) {
-  const buf = term.buffer.active;
-  const cell = term.buffer.active.getNullCell?.() || { getChars:()=>'', getFgColor:()=>0, getBgColor:()=>0, isBold:()=>false, isDim:()=>false };
-  const results = [];
-  const seen = new Set();
-
-  for (let i = Math.max(0, buf.length - 500); i < buf.length; i++) {
-    const line = buf.getLine(i);
-    if (!line) continue;
-    const text = line.translateToString(true).trim();
-    if (!text) continue;
-
-    // 첫 비공백 셀의 색상 추출
-    for (let x = 0; x < line.length; x++) {
-      const c = line.getCell(x);
-      if (!c || !c.getChars().trim()) continue;
-      const fg = c.getFgColor();
-      const bg = c.getBgColor();
-      const attrs = [c.isBold()?'bold':'', c.isDim?c.isDim()?'dim':'':'', c.isItalic()?'italic':'', c.isUnderline()?'ul':''].filter(Boolean).join('|');
-      const key = `fg:${fg} bg:${bg} ${attrs}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        results.push({ key, sample: text.slice(0, 60) });
-      }
-      break;
-    }
-  }
-  return results;
+// ── Session info panel (status/usage/mcp/agents/controls) ────────────────────
+// 옵션은 /api/options 에서 동적 로드 (claude --help 파싱)
+let claudeOptions = { efforts: [], permissionModes: [], models: [] };
+async function loadClaudeOptions() {
+  try {
+    const r = await fetch(apiBase() + 'api/options');
+    if (!r.ok) return;
+    claudeOptions = await r.json();
+  } catch {}
 }
 
-// ❯ 라인 셀별 색상 분석 (프롬프트 추천 fg/bg 탐지용)
-// ❯ 프롬프트 라인 전체 목록 — 중복 제거 없이 모든 ❯ 라인 색상 출력
-window.ecPrompt = () => {
-  const ch = activeId !== null ? channels.get(activeId) : null;
-  if (!ch) return console.log('no active channel');
-  const buf = ch.term.buffer.active;
-  const results = [];
-  for (let i = Math.max(0, buf.length - 200); i < buf.length; i++) {
-    const line = buf.getLine(i);
-    if (!line) continue;
-    const text = line.translateToString(true).trim();
-    if (!text.startsWith('❯')) continue;
-    // 첫 셀 색상
-    let fg = -1, bg = -1, dim = false;
-    for (let x = 0; x < line.length; x++) {
-      const c = line.getCell(x);
-      if (!c || !c.getChars().trim()) continue;
-      fg = c.getFgColor(); bg = c.getBgColor();
-      dim = c.isDim ? !!c.isDim() : false;
-      break;
-    }
-    results.push({ fg, bg, dim, text: text.slice(0, 60) });
+function parseControlsFromArgs(args) {
+  // sess.args(또는 argsOverride) 에서 model/effort/permission 추출
+  const a = args || [];
+  let model = 'default', effort = 'default', permissionMode = 'default';
+  let permissionPromptTool = null;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] === '--model' && a[i+1]) model = a[i+1];
+    if (a[i] === '--effort' && a[i+1]) effort = a[i+1];
+    if (a[i] === '--permission-mode' && a[i+1]) permissionMode = a[i+1];
+    if (a[i] === '--permission-prompt-tool' && a[i+1]) permissionPromptTool = a[i+1];
   }
-  console.table(results);
-  return results;
-};
-
-window.ecSuggest = () => {
-  const ch = activeId !== null ? channels.get(activeId) : null;
-  if (!ch) return console.log('no active channel');
-  const buf = ch.term.buffer.active;
-  for (let i = buf.length - 1; i >= Math.max(0, buf.length - 10); i--) {
-    const line = buf.getLine(i);
-    if (!line) continue;
-    if (!line.translateToString(true).trim().startsWith('❯')) continue;
-    const cells = [];
-    let lastFg = -99, lastBg = -99, lastDim = false;
-    for (let x = 0; x < line.length; x++) {
-      const c = line.getCell(x);
-      if (!c || !c.getChars().trim()) continue;
-      const fg = c.getFgColor(), bg = c.getBgColor();
-      const dim = c.isDim ? !!c.isDim() : false;
-      const italic = c.isItalic ? !!c.isItalic() : false;
-      // fg, bg, dim, italic 중 하나라도 변하면 기록
-      if (fg !== lastFg || bg !== lastBg || dim !== lastDim) {
-        cells.push({ x, fg, bg, dim, italic, sample: line.translateToString(true).slice(x, x + 40) });
-        lastFg = fg; lastBg = bg; lastDim = dim;
-      }
-    }
-    console.table(cells);
-    // ❯ 다음 3줄도 확인 (제안이 별도 줄일 경우)
-    for (let j = i + 1; j < Math.min(i + 4, buf.length); j++) {
-      const nl = buf.getLine(j);
-      if (!nl) continue;
-      const nt = nl.translateToString(true).trim();
-      if (!nt) continue;
-      let nfg = -1, nbg = -1;
-      for (let x = 0; x < nl.length; x++) { const c = nl.getCell(x); if (c?.getChars().trim()) { nfg = c.getFgColor(); nbg = c.getBgColor(); break; } }
-      console.log(`[+${j-i}] fg:${nfg} bg:${nbg} | ${nt.slice(0, 60)}`);
-    }
-    return cells;
-  }
-  console.log('❯ 라인 없음');
-};
-
-// 개발 콘솔 명령: window.ecSample() — 콘솔 전용, 뷰 영향 없음
-window.ecSample = () => {
-  const ch = activeId !== null ? channels.get(activeId) : null;
-  if (!ch) return console.log('no active channel');
-  const samples = sampleColors(ch.term);
-  console.table(samples);
-  console.log('[easyclaude] ecSample 완료 — 콘솔에서 확인하세요');
-};
-
-// Claude Code 색상 스펙 (ecPatterns() 확인 완료)
-// dim: xterm.js가 134217728 (비트플래그)를 반환 — truthy 체크로 통일
-const CC = {
-  HUMAN:       (fg, bg)      => fg === 248 && bg === 255,
-  HUMAN_CONT:  (fg, bg)      => fg === 16  && bg === 255,  // Human 메시지 이어지는 줄 (래핑)
-  ASSISTANT:   (fg, bg)      => fg === 16  && bg === -1,
-  TOOL_CALL:   (fg, bg)      => fg === 65  && bg === -1,
-  TOOL_OUT:    (fg, bg, dim) => fg === 241 && bg === -1 && !dim,
-  THINKING:    (fg, bg)      => fg === 174 && bg === -1,  // ·✶*✢✽ 등 thinking 스피너
-  DIFF_ADD:    (fg, bg)      => bg === 194,
-  DIFF_DEL:    (fg, bg)      => bg === 224 || bg === 217,
-  DIFF_LINENO: (fg, bg, dim) => fg === 236 && bg === -1 && !!dim,
-  SEPARATOR:   (fg, bg)      => fg === 37  && bg === -1,
-  STATUSLINE:  (fg, bg, dim) => fg === 241 && bg === -1 && !!dim,
-  PERMISSION:  (fg, bg)      => fg === 131 && bg === -1,
-  MCP:         (fg, bg)      => fg === 105 && bg === -1,  // ← ioa: 채널 메시지
-  TMUX:        (fg, bg)      => bg === 2   || fg === 5,
-};
-
-function readBufferCells(term) {
-  const buf = term.buffer.active;
-  const rows = [];
-  for (let i = 0; i < buf.length; i++) {
-    const line = buf.getLine(i);
-    if (!line) continue;
-    const text = line.translateToString(true).trimEnd();
-    // 첫 비공백 셀에서 색상 추출
-    let fg = -1, bg = -1, dim = false;
-    for (let x = 0; x < line.length; x++) {
-      const cell = line.getCell(x);
-      if (!cell || !cell.getChars().trim()) continue;
-      fg = cell.getFgColor();
-      bg = cell.getBgColor();
-      dim = cell.isDim ? cell.isDim() : false;
-      break;
-    }
-    // ❯ 라인의 경우: dim 셀 포함 여부 추가 탐지 (서제스트 감지용)
-    let hasDimCell = false;
-    if (text.trimStart().startsWith('❯') && fg === -1 && bg === -1) {
-      for (let x2 = 1; x2 < line.length; x2++) {
-        const c2 = line.getCell(x2);
-        if (c2?.getChars().trim() && (c2.isDim ? c2.isDim() : false)) { hasDimCell = true; break; }
-      }
-    }
-    rows.push({ text, fg, bg, dim, hasDimCell });
-  }
-  // 하단 빈 줄 제거
-  while (rows.length && !rows[rows.length - 1].text) rows.pop();
-  return rows;
+  return { model, effort, permissionMode, permissionPromptTool, raw: a };
 }
 
-function readBufferLines(term) {
-  return readBufferCells(term).map(r => r.text);
-}
-
-function parseClaudeOutput(rows, cursorLine) {  // cursorLine: 현재 활성 프롬프트 라인 인덱스
-  const turns = [];
-  let cur = null;
-  const processedIdx = new Set(); // 처리된 row 인덱스 (파싱 or 무시)
-
-  const flush = () => {
-    if (cur) {
-      cur.body = cur.body.replace(/\n{3,}/g, '\n\n').trimEnd();
-      if (cur.body.trim()) turns.push(cur);
-    }
-    cur = null;
+function patchArgs(originalArgs, patches) {
+  // model/effort/permissionMode 만 교체, 나머지는 보존. permission-prompt-tool 토글도 처리.
+  const args = (originalArgs || []).slice();
+  const removeFlag = flag => {
+    let i = args.indexOf(flag);
+    while (i !== -1) { args.splice(i, 2); i = args.indexOf(flag); }
   };
-  const push   = (type, idx) => { flush(); cur = { type, body: '' }; if (idx !== undefined) processedIdx.add(idx); };
-  const append = (text, idx) => { if (cur) { cur.body += (cur.body ? '\n' : '') + text; if (idx !== undefined) processedIdx.add(idx); } };
-  const ignore = idx => processedIdx.add(idx);
-
-  rows.forEach((row, idx) => {
-    const { text, fg, bg, dim } = row;
-    const t = text.trim();
-    if (!t) { if (cur) cur.body += '\n'; return; }
-
-    // 무시 처리 — 색상 기반 + 텍스트 패턴 백업 (둘 다 processedIdx에 등록)
-    const skip = () => { ignore(idx); return true; };
-    if (CC.TMUX(fg, bg))           { skip(); return; }
-    if (CC.STATUSLINE(fg, bg, dim)){ skip(); return; }
-    if (/^\[view-|^\[.*Arche/.test(t))           { skip(); return; }
-    if (/^[─━╌]{2}\d/.test(t))    { skip(); return; } // ──N tmux pane 타이틀
-    if (/Sonnet|Opus|Haiku/.test(t) && /ctx:\d+%|left/.test(t)) { skip(); return; }
-    if (/^[─━═─━]+$/.test(t))                    { skip(); return; }
-    if (/^[─━]{2,}.*[─━]{2,}$/.test(t))         { skip(); return; } // ───── Arche ── 혼합 구분선
-    if (CC.DIFF_LINENO(fg, bg, dim))             { skip(); return; }
-    if (/^\d+\s*$/.test(t))                      { skip(); return; }
-    // Thinking 스피너 (fg:174)
-    if (CC.THINKING(fg, bg)) { if (cur?.type !== 'thinking') push('thinking', idx); append(t, idx); return; }
-    // Thinking 완료: ✻ Cooked/Worked for Ns (fg:241 비-dim, 텍스트로 구분)
-    // Timing: ✻ + 임의 단어 + "for Nd/Nm/Ns" — 모든 변형 통합
-    // Recap / MCP는 TOOL_OUT보다 먼저 체크
-    if (/^[※]\s*recap:/i.test(t)) { push('recap', idx); append(t.replace(/^[※]\s*recap:\s*/i, ''), idx); return; }
-    // Recap 연속: 이전 섹션이 recap이면 계속 붙임 (여러 줄 지원)
-    if (cur?.type === 'recap' && !/^[●⎿✻✢·•✶✽*✾❯⏵※←╭│╰✢✻]/.test(t) && fg !== 65) {
-      append(t, idx); return;
+  if (patches.model !== undefined) {
+    removeFlag('--model');
+    if (patches.model && patches.model !== 'default') args.push('--model', patches.model);
+  }
+  if (patches.effort !== undefined) {
+    removeFlag('--effort');
+    if (patches.effort && patches.effort !== 'default') args.push('--effort', patches.effort);
+  }
+  if (patches.permissionMode !== undefined) {
+    removeFlag('--permission-mode');
+    removeFlag('--permission-prompt-tool');
+    // mcp-config는 우리가 자동 주입했으니 제거하지 않음 (다른 mcp config 보존)
+    if (patches.permissionMode === 'prompt-tool') {
+      args.push('--permission-prompt-tool', 'mcp__easypermitter__permission_prompt');
+    } else if (patches.permissionMode && patches.permissionMode !== 'default') {
+      args.push('--permission-mode', patches.permissionMode);
     }
-    if (CC.MCP(fg, bg) || /^←\s+\w+:/.test(t)) { push('mcp', idx); append(t.replace(/^←\s+\w+:\s*/, ''), idx); return; }
-    // Called X (ctrl+o to expand) → MCP 호출 표시
-    if (/^Called\s+\w/.test(t)) { push('mcp', idx); append(t, idx); return; }
+  }
+  return args;
+}
 
-    if (CC.TOOL_OUT(fg, bg, dim) && /^✻\s+\w.*\s+for\s+[\d]/.test(t)) {
-      push('timing', idx); append(t.replace(/^[✻]\s*/, ''), idx); return;
-    }
-    // 텍스트 기반 thinking 패턴 백업
-    if (/^[·•✢✻✶✽*]\s/.test(t) && /thinking|calculat|infus|brewing|ponder|unravel/i.test(t)) {
-      if (cur?.type !== 'thinking') push('thinking', idx); append(t, idx); return;
-    }
+let _infoCurrentArgs = null;
 
-    // fg:248 bg:255 = 현재 활성 인터랙티브 프롬프트 (cmd 입력)
-    if (CC.HUMAN(fg, bg))       { const body = t.replace(/^❯\s*/, '').trim(); if (body) { push('human', idx); append(body, idx); } else ignore(idx); return; }
-    if (CC.HUMAN_CONT(fg, bg))  { if (cur?.type === 'human') append(t, idx); else { push('human', idx); append(t, idx); } return; }
-    // fg:-1 bg:-1 + ❯ = 명령줄 관련
-    if (fg === -1 && bg === -1 && /^❯/.test(t)) {
-      // 커서 라인 ±1 범위 또는 서제스트는 무시 (하단 잔여물 방지)
-    if (Math.abs(idx - cursorLine) <= 1 || row.hasDimCell) { ignore(idx); return; }
-      const body = t.replace(/^❯\s*/, '').trim();
-      if (body) { push('cmdline', idx); append(body, idx); } else ignore(idx);
+function openInfoPanel() {
+  const ch = activeChannel();
+  if (!ch) { alert('활성 세션이 없습니다.'); return; }
+  const sess = ecSessions.find(s => s.id === ch.sessionId);
+  const u = ch.usage || {};
+  const s = ch.session || {};
+  const ctrl = parseControlsFromArgs(sess?.args);
+  _infoCurrentArgs = ctrl.raw.slice();
+
+  // permission mode 표시 정규화
+  let permDisplay = ctrl.permissionMode;
+  if (ctrl.permissionPromptTool) permDisplay = 'prompt-tool';
+
+  $('info-session-label').textContent = ch.label;
+  $('info-body').innerHTML = `
+    <section class="ec-info-section">
+      <h4>상태</h4>
+      <div class="ec-info-grid">
+        <div><span>Session ID</span><code>${esc(s.id || ch.session?.id || '')}</code></div>
+        <div><span>cwd</span><code>${esc(s.cwd || sess?.cwd || '')}</code></div>
+        <div><span>Model</span><code>${esc(s.model || '-')}</code></div>
+        <div><span>Version</span><code>${esc(s.claudeCodeVersion || '-')}</code></div>
+        <div><span>Permission</span><code>${esc(s.permissionMode || permDisplay || '-')}</code></div>
+        <div><span>PID</span><code>${esc(ch.session?.pid || '-')}</code></div>
+      </div>
+    </section>
+
+    <section class="ec-info-section">
+      <h4>사용량</h4>
+      <div class="ec-info-grid">
+        <div><span>Input</span><b>${fmtNum(u.input)}</b></div>
+        <div><span>Output</span><b>${fmtNum(u.output)}</b></div>
+        <div><span>Cache read</span><b>${fmtNum(u.cache_read)}</b></div>
+        <div><span>Cache create</span><b>${fmtNum(u.cache_creation)}</b></div>
+        <div class="ec-info-total"><span>합계</span><b>${fmtNum((u.input||0)+(u.output||0)+(u.cache_read||0)+(u.cache_creation||0))}</b></div>
+      </div>
+    </section>
+
+    <section class="ec-info-section">
+      <h4>MCP (${(s.mcpServers||[]).length})</h4>
+      <div class="ec-mcp-list">
+        ${(s.mcpServers||[]).map(m => `
+          <div class="ec-mcp-row">
+            <code>${esc(m.name)}</code>
+            <span class="ec-mcp-status ec-mcp-${m.status}">${esc(m.status)}</span>
+          </div>`).join('') || '<div class="ec-empty">없음</div>'}
+      </div>
+    </section>
+
+    <section class="ec-info-section">
+      <h4>에이전트 / 스킬</h4>
+      <div class="ec-info-tags">
+        ${(s.agents||[]).map(a => `<span class="ec-tag">${esc(a)}</span>`).join('') || '<span class="ec-muted">없음</span>'}
+      </div>
+      <div class="ec-info-tags" style="margin-top:4px">
+        ${(s.skills||[]).map(a => `<span class="ec-tag ec-tag-skill">${esc(a)}</span>`).join('')}
+      </div>
+    </section>
+
+    <section class="ec-info-section">
+      <h4>제어 (변경 후 재기동 필요)</h4>
+      <label class="ec-field">
+        <span>Model</span>
+        <select id="info-model">
+          <option value="default" ${ctrl.model==='default'?'selected':''}>default</option>
+          ${(claudeOptions.models||[]).map(m => `<option value="${esc(m)}" ${m===ctrl.model?'selected':''}>${esc(m)}</option>`).join('')}
+        </select>
+      </label>
+      <label class="ec-field">
+        <span>Effort</span>
+        <select id="info-effort">
+          <option value="default" ${ctrl.effort==='default'?'selected':''}>default</option>
+          ${(claudeOptions.efforts||[]).map(m => `<option value="${esc(m)}" ${m===ctrl.effort?'selected':''}>${esc(m)}</option>`).join('')}
+        </select>
+      </label>
+      <label class="ec-field">
+        <span>Permission mode</span>
+        <select id="info-perm">
+          <option value="default" ${permDisplay==='default'?'selected':''}>default</option>
+          ${(claudeOptions.permissionModes||[]).filter(m=>m!=='default').map(m => {
+            const disabled = (m === 'bypassPermissions' && !cfg.bypassEnabled) ? ' disabled' : '';
+            const lock = disabled ? ' 🔒' : '';
+            return `<option value="${esc(m)}" ${m===permDisplay?'selected':''}${disabled}>${esc(m)}${lock}</option>`;
+          }).join('')}
+          <option value="prompt-tool" ${permDisplay==='prompt-tool'?'selected':''}>prompt-tool (easypermitter)</option>
+        </select>
+        ${!cfg.bypassEnabled ? '<small class="ec-field-hint">bypassPermissions 사용은 설정 → 외관 → "위험 모드 허용" 켜야 함</small>' : ''}
+      </label>
+    </section>
+  `;
+  $('ec-info').classList.remove('ec-hidden');
+}
+
+$('ec-info-btn')?.addEventListener('click', openInfoPanel);
+$('info-close')?.addEventListener('click', () => $('ec-info').classList.add('ec-hidden'));
+$('info-cancel')?.addEventListener('click', () => $('ec-info').classList.add('ec-hidden'));
+$('info-restart-apply')?.addEventListener('click', () => {
+  const ch = activeChannel();
+  if (!ch) return;
+  const newArgs = patchArgs(_infoCurrentArgs, {
+    model:           $('info-model').value,
+    effort:          $('info-effort').value,
+    permissionMode:  $('info-perm').value,
+  });
+  if (!confirm(`'${ch.label}' 세션을 재기동하고 새 설정 적용할까요?\n(대화 이력은 --resume 으로 보존)`)) return;
+  sendWs({ op:'restart', id: ch.id, args: newArgs });
+  $('ec-info').classList.add('ec-hidden');
+});
+
+// ── Claude home cards in settings ─────────────────────────────────────────────
+async function renderHomesList() {
+  const $list = $('cfg-homes-list');
+  if (!$list) return;
+  $list.innerHTML = '<div class="ec-empty">로드 중…</div>';
+  try {
+    const r = await fetch(apiBase() + 'api/claude-homes');
+    const data = await r.json();
+    const homes = data.list || [];
+    if (!homes.length) { $list.innerHTML = '<div class="ec-empty">없음</div>'; return; }
+    // 각 home에 대해 auth status도 비동기 조회
+    const cards = homes.map(h => {
+      const id = 'home-' + h.home.replace(/[^a-z0-9]+/gi, '_');
+      const writable = h.writable;
+      const statusBadge = `<span class="ec-home-status" id="${id}-status">조회 중…</span>`;
+      return `
+        <div class="ec-home-card">
+          <div class="ec-home-row">
+            <div class="ec-home-path"><code>${esc(h.home)}</code></div>
+            ${statusBadge}
+          </div>
+          <div class="ec-home-row ec-home-meta">
+            <span>${esc(h.email || '(이메일 없음)')}</span>
+            <span>${writable ? '✏️ 쓰기 가능' : '🔒 읽기 전용'}</span>
+          </div>
+          <div class="ec-home-actions">
+            <button class="ec-btn ec-home-edit" data-home="${esc(h.home)}" ${writable ? '' : 'disabled'}>settings.json 편집</button>
+            <button class="ec-btn ec-home-tail-cmd" data-home="${esc(h.home)}">jsonl 위치</button>
+          </div>
+        </div>`;
+    });
+    $list.innerHTML = cards.join('');
+    // auth status 조회
+    for (const h of homes) {
+      const id = 'home-' + h.home.replace(/[^a-z0-9]+/gi, '_');
+      try {
+        const r2 = await fetch(apiBase() + 'api/auth/status?home=' + encodeURIComponent(h.home));
+        const st = await r2.json();
+        const el = document.getElementById(id + '-status');
+        if (!el) continue;
+        if (st.loggedIn) el.innerHTML = `<span class="ec-badge ec-badge-ok">● ${esc(st.subscriptionType || 'logged in')}</span>`;
+        else el.innerHTML = `<span class="ec-badge ec-badge-warn">○ 미로그인</span>`;
+      } catch {}
+    }
+    // 편집 버튼
+    $list.querySelectorAll('.ec-home-edit').forEach(b => {
+      b.addEventListener('click', () => openSettingsEdit(b.dataset.home));
+    });
+    // jsonl 위치 (활성 세션의 jsonl)
+    $list.querySelectorAll('.ec-home-tail-cmd').forEach(b => {
+      b.addEventListener('click', () => showJsonlPath(b.dataset.home));
+    });
+  } catch (e) {
+    $list.innerHTML = '<div class="ec-empty">로드 실패: ' + esc(e.message) + '</div>';
+  }
+}
+
+async function openSettingsEdit(home) {
+  $('se-home-label').textContent = home;
+  $('se-content').value = '로드 중…';
+  $('se-message').textContent = '';
+  $('ec-settings-edit').classList.remove('ec-hidden');
+  $('ec-settings-edit').dataset.home = home;
+  try {
+    const r = await fetch(apiBase() + 'api/claude-settings?home=' + encodeURIComponent(home));
+    const data = await r.json();
+    if (data.error) { $('se-message').textContent = data.error; return; }
+    $('se-content').value = data.content;
+  } catch (e) {
+    $('se-message').textContent = '로드 실패: ' + e.message;
+  }
+}
+
+async function showJsonlPath(home) {
+  const ch = activeChannel();
+  if (!ch) { alert('활성 세션이 없습니다'); return; }
+  try {
+    const r = await fetch(apiBase() + 'api/sessions/' + encodeURIComponent(ch.sessionId) + '/jsonl-path');
+    const data = await r.json();
+    if (data.tailCmd) {
+      prompt('터미널에서 실행하세요 (Ctrl+C 또는 Cmd+C로 복사):', data.tailCmd);
+    } else {
+      alert('해당 세션의 jsonl 파일을 찾을 수 없습니다.');
+    }
+  } catch (e) {
+    alert('오류: ' + e.message);
+  }
+}
+
+$('se-close')?.addEventListener('click', () => $('ec-settings-edit').classList.add('ec-hidden'));
+$('se-cancel')?.addEventListener('click', () => $('ec-settings-edit').classList.add('ec-hidden'));
+$('se-save')?.addEventListener('click', async () => {
+  const home = $('ec-settings-edit').dataset.home;
+  const content = $('se-content').value;
+  $('se-message').textContent = '저장 중…';
+  $('se-message').style.color = 'var(--text-2)';
+  try {
+    const r = await fetch(apiBase() + 'api/claude-settings?home=' + encodeURIComponent(home), {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ content }),
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) {
+      $('se-message').style.color = 'var(--danger)';
+      $('se-message').textContent = data.error || ('HTTP ' + r.status);
       return;
     }
-    if (CC.ASSISTANT(fg, bg))   { if (cur?.type !== 'assistant') push('assistant', idx); append(t.replace(/^●\s*/, ''), idx); return; }
-    if (CC.TOOL_CALL(fg, bg))   { push('tool_call', idx); append(t.replace(/^●\s*/, ''), idx); return; }
-    if (CC.TOOL_OUT(fg, bg,dim)){ if (cur?.type !== 'tool_out')  push('tool_out',  idx); append(t.replace(/^⎿\s*/, ''), idx); return; }
-    if (CC.DIFF_ADD(fg, bg))    { if (cur?.type !== 'diff')      push('diff',      idx); append(t, idx); return; }
-    // 권한 확인: ⏵⏵ 텍스트 패턴 필수 (fg:131만으론 Edit 툴 출력과 구분 안됨)
-    if (CC.PERMISSION(fg, bg) && /^⏵/.test(t)) { push('permission', idx); append(t, idx); return; }
-
-    if (!cur) push('assistant', idx);
-    append(text, idx);
-  });
-  flush();
-  turns._parsedIdx = processedIdx;
-  return turns;
-}
-
-function renderParsed(turns, rows) {
-  if (!turns.length) { $parsedView.innerHTML = '<div style="color:var(--muted);text-align:center;padding:40px">출력 대기 중...</div>'; return; }
-  const LABELS = { human:'Human', cmdline:'명령줄', assistant:'Assistant', tool_call:'Tool 호출', tool_out:'Tool 출력', diff:'Diff', thinking:'Thinking', timing:'처리 시간', permission:'권한 확인', recap:'Recap', mcp:'MCP/IOA', other:'기타' };
-  const COLORS = { human:'var(--accent)', cmdline:'#6c7086', assistant:'var(--green)', tool_call:'#cba6f7', tool_out:'#f9e2af', diff:'#a6e3a1', thinking:'#74c7ec', timing:'var(--muted)', permission:'#f38ba8', recap:'#fab387', mcp:'#89dceb', other:'var(--muted)' };
-
-  // 인덱스 기반 미파싱 항목 추출
-  const parsedIdx = turns._parsedIdx || new Set(); // 파싱 + 무시 모두 포함
-  const unparsedUniq = (rows || [])
-    .filter((r, i) => !parsedIdx.has(i) && r.text.trim() && r.text.trim().length > 1 && !/^[─━═╭╰│✳]+$/.test(r.text.trim()))
-    .map(r => r.text.trim().slice(0, 120))
-    .filter((v, i, a) => a.indexOf(v) === i);
-
-  let html = turns.map(t => `
-    <div class="ec-turn">
-      <div class="ec-turn-label" style="color:${COLORS[t.type]||'var(--muted)'}">${LABELS[t.type] || t.type}</div>
-      <div class="ec-turn-body ${t.type}">${esc(t.body)}</div>
-    </div>
-  `).join('');
-
-  if (unparsedUniq.length) {
-    html += `
-      <details style="margin-top:8px">
-        <summary style="font-size:11px;color:var(--muted);cursor:pointer;padding:4px 0">파싱 안 된 항목 ${unparsedUniq.length}개</summary>
-        <div class="ec-turn-body other" style="margin-top:6px">${esc(unparsedUniq.join('\n'))}</div>
-      </details>`;
+    $('se-message').style.color = 'var(--green)';
+    $('se-message').textContent = '저장됨 — 실행 중 세션은 재기동 필요';
+    setTimeout(() => $('ec-settings-edit').classList.add('ec-hidden'), 1200);
+  } catch (e) {
+    $('se-message').style.color = 'var(--danger)';
+    $('se-message').textContent = '오류: ' + e.message;
   }
+});
 
-  $parsedView.innerHTML = html;
-  $parsedView.scrollTop = $parsedView.scrollHeight;
+// settings 모달 열 때 homes list 채우기
+const _origSettingsOpen = () => $settings.classList.remove('ec-hidden');
+$settingsBtn?.addEventListener('click', () => { renderHomesList(); });
+
+// ── 새 세션 생성 / 부활 ───────────────────────────────────────────────────────
+let nsActiveTab = 'new'; // 'new' | 'resume'
+let nsResumeSelected = null; // 선택된 history item
+
+function setNsTab(name) {
+  nsActiveTab = name;
+  document.querySelectorAll('.ec-ns-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.ec-ns-pane').forEach(p => p.classList.toggle('ec-hidden', p.dataset.pane !== name));
+  $newSessionCreate.textContent = name === 'resume' ? '부활' : '생성';
 }
 
-// 누적 색상 패턴 (폴링마다 새 조합 추가, 중복 제거)
-const _seenPatterns = new Map(); // key → {fg, bg, dim, sample}
-
-function accumulatePatterns(rows) {
-  rows.forEach(({ text, fg, bg, dim }) => {
-    const t = text.trim();
-    if (!t || t.length < 2) return;
-    const firstChar = [...t][0]; // 첫 unicode 문자
-    const key = `fg:${fg} bg:${bg}${dim?' dim':''} ch:${firstChar}`;
-    if (!_seenPatterns.has(key)) {
-      _seenPatterns.set(key, { fg, bg, dim, char: firstChar, sample: t.slice(0, 60) });
-    }
-  });
+async function populateHomeSelectors() {
+  try {
+    const r = await fetch(apiBase() + 'api/claude-homes');
+    if (!r.ok) return;
+    const data = await r.json();
+    const homes = data.list || [];
+    const renderOptions = () => {
+      const opts = ['<option value="">기본 (현재 HOME)</option>'];
+      for (const h of homes) {
+        const emailTag = h.email ? ` · ${esc(h.email)}` : '';
+        const disabled = h.writable ? '' : ' disabled';
+        const tag = h.writable ? '' : ' (읽기전용/접근불가)';
+        opts.push(`<option value="${esc(h.home)}"${disabled}>${esc(h.home)}${emailTag}${tag}</option>`);
+      }
+      return opts.join('');
+    };
+    const html = renderOptions();
+    const setHomeSelect = id => {
+      const el = $(id);
+      if (!el) return;
+      const cur = el.value;
+      el.innerHTML = html;
+      if (cur && [...el.options].some(o => o.value === cur)) el.value = cur;
+    };
+    setHomeSelect('ns-home');
+    setHomeSelect('rs-home');
+  } catch (e) { console.warn('home scan fail', e); }
 }
 
-// window.ecPatterns() 로 누적된 패턴 확인
-window.ecPatterns = (filterFg) => {
-  let list = [..._seenPatterns.values()];
-  if (filterFg !== undefined) list = list.filter(p => p.fg === filterFg);
-  console.table(list);
-  $parsedView.innerHTML = '<pre style="padding:12px;font-size:11px;color:#cdd6f4;white-space:pre-wrap">' +
-    list.map(p => `fg:${String(p.fg).padEnd(4)} bg:${String(p.bg).padEnd(4)} ${p.dim?'dim':'   '} [${p.char}] ${p.sample}`).join('\n') + '</pre>';
+function showNewSessionModal() {
+  $nsLabel.value = '';
+  $nsCwd.value = '';
+  $nsName.value = '';
+  $nsArgs.value = '';
+  $('ns-home').value = '';
+  $('rs-cwd').value = '';
+  $('rs-q').value = '';
+  $('rs-args').value = '';
+  $('rs-home').value = '';
+  $('rs-list').innerHTML = '<div class="ec-empty">검색 필요</div>';
+  nsResumeSelected = null;
+  setNsTab('new');
+  $newSession.classList.remove('ec-hidden');
+  populateHomeSelectors();
+  setTimeout(() => $nsLabel.focus(), 50);
+}
+
+function apiBase() {
+  // WebSocket 과 동일한 base path 사용. portal/oauth-proxy 라우팅 통과용.
+  return location.pathname.replace(/[^/]*$/, '') || '/';
+}
+async function searchHistory() {
+  const cwd = $('rs-cwd').value.trim();
+  const q = $('rs-q').value.trim();
+  const params = new URLSearchParams();
+  if (cwd) params.set('cwd', cwd);
+  if (q) params.set('q', q);
+  params.set('limit', '40');
+  const $list = $('rs-list');
+  $list.innerHTML = '<div class="ec-empty">검색 중…</div>';
+  try {
+    const r = await fetch(apiBase() + 'api/sessions/history?' + params.toString());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const ct = r.headers.get('content-type') || '';
+    if (!ct.includes('json')) throw new Error('서버 응답 비JSON (' + r.status + ')');
+    const data = await r.json();
+    const items = data.list || [];
+    if (!items.length) { $list.innerHTML = '<div class="ec-empty">결과 없음</div>'; return; }
+    $list.innerHTML = items.map(it => {
+      const date = new Date(it.mtime).toLocaleString('ko-KR', { dateStyle: 'short', timeStyle: 'short' });
+      const title = it.aiTitle || it.firstMessage.slice(0, 80) || '(제목 없음)';
+      const cwd = it.cwd || it.encodedCwd;
+      return `<div class="ec-rs-item" data-claude-id="${esc(it.sessionId)}" data-cwd="${esc(cwd)}" data-title="${esc(title)}">
+        <div class="ec-rs-item-title">${esc(title)}</div>
+        <div class="ec-rs-item-meta">
+          <span class="ec-rs-item-cwd">${esc(cwd)}</span>
+          <span class="ec-rs-item-date">${esc(date)}</span>
+          <span class="ec-rs-item-size">${it.sizeKB}KB</span>
+        </div>
+      </div>`;
+    }).join('');
+    $list.querySelectorAll('.ec-rs-item').forEach(el => {
+      el.addEventListener('click', () => {
+        $list.querySelectorAll('.ec-rs-item').forEach(x => x.classList.remove('selected'));
+        el.classList.add('selected');
+        nsResumeSelected = {
+          claudeId: el.dataset.claudeId,
+          cwd: el.dataset.cwd,
+          title: el.dataset.title,
+        };
+      });
+    });
+  } catch (e) {
+    $list.innerHTML = `<div class="ec-empty">오류: ${esc(e.message)}</div>`;
+  }
+}
+
+let searchDebounce = null;
+function scheduleSearch() {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(searchHistory, 300);
+}
+function hideNewSessionModal() { $newSession.classList.add('ec-hidden'); }
+
+// 셸 토큰화: 공백 split + 따옴표 보존 (간단)
+function tokenizeArgs(str) {
+  if (!str || !str.trim()) return [];
+  const out = [];
+  const re = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(str)) !== null) {
+    out.push(m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]);
+  }
+  return out;
+}
+
+const PRESETS = {
+  // 서버가 --permission-prompt-tool 보이면 mcp-config 자동 주입.
+  bypass:   ['--permission-mode', 'bypassPermissions'],
+  prompt:   ['--permission-prompt-tool', 'mcp__easypermitter__permission_prompt'],
+  opus1m:   ['--model', 'opus[1m]'],
+  sonnet1m: ['--model', 'sonnet[1m]'],
 };
 
-function updateParsed() {
-  const ch = activeId !== null ? channels.get(activeId) : null;
-  if (!ch || !parsedMode) return;
-  const rows = readBufferCells(ch.term); // 단일 읽기
-  accumulatePatterns(rows);
-  const cursorLine = ch.term.buffer.active.baseY + ch.term.buffer.active.cursorY;
-
-  // 현재 커서 라인 상태 파악
-  const curRow = rows[cursorLine];
-  let curState = '—';
-  if (curRow) {
-    const t = curRow.text.trim();
-    if (!t || t === '❯') curState = '빈 프롬프트';
-    else if (curRow.hasDimCell) curState = `제안: ${t.replace(/^❯\s*/, '')}`;
-    else curState = `계류: ${t.replace(/^❯\s*/, '')}`;
-  }
-  $parseStatus.textContent = `${rows.length}줄 / 커서:${cursorLine} / ${curState}`;
-
-  if (_paused) return;
-  const turns = parseClaudeOutput(rows, cursorLine);
-  renderParsed(turns, rows);
-}
-
-// 뷰 토글
-let _paused = false;
-const $pauseBtn = document.getElementById('ec-pause-btn');
-
-document.getElementById('ec-view-raw').addEventListener('click', () => {
-  parsedMode = false; _paused = false;
-  document.getElementById('ec-view-raw').classList.add('active');
-  document.getElementById('ec-view-parsed').classList.remove('active');
-  $pauseBtn.textContent = '⏸'; $pauseBtn.classList.remove('active');
-  document.getElementById('ec-terms').classList.remove('ec-hidden');
-  $parsedView.classList.add('ec-hidden');
-  clearInterval(_parseTimer); _parseTimer = null;
-});
-document.getElementById('ec-view-parsed').addEventListener('click', () => {
-  parsedMode = true; _paused = false; _seenPatterns.clear(); // 탭 전환 시 누적 초기화
-  document.getElementById('ec-view-parsed').classList.add('active');
-  document.getElementById('ec-view-raw').classList.remove('active');
-  $pauseBtn.textContent = '⏸'; $pauseBtn.classList.remove('active');
-  document.getElementById('ec-terms').classList.add('ec-hidden');
-  $parsedView.classList.remove('ec-hidden');
-  updateParsed();
-  clearInterval(_parseTimer);
-  _parseTimer = setInterval(updateParsed, 800);
-});
-// tmux 전체 스크롤백 캡처 → 텍스트 파서로 PARSED 뷰 갱신
-document.getElementById('ec-capture-btn').addEventListener('click', async () => {
-  const ch = activeId !== null ? channels.get(activeId) : null;
-  if (!ch) return;
-  const base = location.pathname.replace(/[^/]*$/, '') || '/';
-  const res = await fetch(`${base}api/capture/${ch.sessionId}`);
-  if (!res.ok) return;
-  const text = await res.text();
-  const lines = text.split('\n');
-  // 텍스트 기반 파서 (색상 없음)
-  const turns = parseTextCapture(lines);
-  parsedMode = true;
-  document.getElementById('ec-view-parsed').classList.add('active');
-  document.getElementById('ec-view-raw').classList.remove('active');
-  document.getElementById('ec-terms').classList.add('ec-hidden');
-  $parsedView.classList.remove('ec-hidden');
-  $parseStatus.textContent = `${lines.length}줄 (전체)`;
-  renderParsed(turns, []);
-});
-
-function parseTextCapture(lines) {
-  const turns = []; let cur = null;
-  const flush = () => { if (cur) { cur.body = cur.body.trimEnd(); if (cur.body.trim()) turns.push(cur); } cur = null; };
-  const push = type => { flush(); cur = { type, body: '' }; };
-  const app  = line => { if (cur) cur.body += (cur.body ? '\n' : '') + line; };
-  for (const line of lines) {
-    const t = line.trim();
-    if (!t || /^─+$/.test(t) || /^[─]{2,}.*[─]{2,}$/.test(t)) continue;
-    if (/Sonnet|Opus|Haiku/.test(t) && /ctx:\d+%/.test(t)) continue;
-    if (/^\[view-|^[─━]{2}\d/.test(t)) continue;
-    if (/^❯\s+/.test(t)) { const b = t.replace(/^❯\s+/, '').trim(); if (b) { push('human'); app(b); } continue; }
-    if (/^●\s+Bash\(|^●\s+\w+\(/.test(t)) { push('tool_call'); app(t.replace(/^●\s+/, '')); continue; }
-    if (/^⎿/.test(t)) { if (cur?.type !== 'tool_out') push('tool_out'); app(t.replace(/^⎿\s*/, '')); continue; }
-    if (/^●\s+/.test(t)) { if (cur?.type !== 'assistant') push('assistant'); app(t.replace(/^●\s+/, '')); continue; }
-    if (/^[·•✢✻]\s/.test(t) && /thinking|calculat|infus/i.test(t)) { push('thinking'); app(t.replace(/^[·•✢✻]\s*/, '')); continue; }
-    if (/^⏵⏵/.test(t)) { push('permission'); app(t); continue; }
-    if (!cur) push('assistant');
-    app(line);
-  }
-  flush();
-  return turns;
-}
-
-$pauseBtn.addEventListener('click', () => {
-  if (!parsedMode) return;
-  _paused = !_paused;
-  if (_paused) {
-    clearInterval(_parseTimer); _parseTimer = null;
-    $pauseBtn.textContent = '▶'; $pauseBtn.classList.add('active');
-  } else {
-    $pauseBtn.textContent = '⏸'; $pauseBtn.classList.remove('active');
-    updateParsed();
-    _parseTimer = setInterval(updateParsed, 800);
-  }
-});
-
-// ── CMD / INT toggle ─────────────────────────────────────────────────────────
-$modeBtn.addEventListener('click', () => {
-  cmdMode = !cmdMode;
-  $modeBtn.textContent = cmdMode ? 'CMD' : 'INT';
-  $modeBtn.className = cmdMode ? 'ec-mode-cmd' : 'ec-mode-int';
-  $inputbar.style.opacity = cmdMode ? '' : '0.4';
-  $inputbar.style.pointerEvents = cmdMode ? '' : 'none';
-  const ch = activeId !== null ? channels.get(activeId) : null;
-  if (cmdMode) { $input.focus(); }
-  else if (ch) { ch.term.textarea.tabIndex = 0; ch.term.focus(); }
-});
-
-// ── Reconnect ────────────────────────────────────────────────────────────────
-document.getElementById('ec-settings-btn').addEventListener('click', openSettings);
-// Reconnect: close + reopen
-function reconnect() {
-  const ch = activeId !== null ? channels.get(activeId) : null;
-  if (!ch) return;
-  sendWs({ op:'close', id: ch.id });
-  const newId = nextId++;
-  ch.id = newId;
-  channels.delete(ch.id);
-  channels.set(newId, ch);
-  activeId = newId;
-  ch.alive = false;
-  ch.tab?.classList.remove('connected');
-  sendWs({ op:'open', id: newId, sessionId: ch.sessionId });
-}
-
-// ── Settings ─────────────────────────────────────────────────────────────────
-function openSettings() {
-  document.getElementById('cfg-fontsize').value = cfg.fontSize;
-  document.getElementById('cfg-fontsize-val').textContent = cfg.fontSize;
-  document.getElementById('cfg-theme').value = cfg.theme;
-  $settings.classList.remove('ec-hidden');
-}
-function applyCfg() {
-  channels.forEach(({ term, fitAddon }) => {
-    Object.assign(term.options, { fontSize: cfg.fontSize, theme: THEMES[cfg.theme] || THEMES.dark });
-    fitAddon.fit();
+$newSessionBtn?.addEventListener('click', showNewSessionModal);
+$newSessionClose?.addEventListener('click', hideNewSessionModal);
+$newSessionCancel?.addEventListener('click', hideNewSessionModal);
+$newSession.querySelectorAll('[data-preset]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const preset = PRESETS[btn.dataset.preset];
+    if (!preset) return;
+    const targetId = btn.dataset.target || 'ns-args';
+    const $target = $(targetId);
+    if (!$target) return;
+    const cur = $target.value.trim();
+    $target.value = (cur ? cur + ' ' : '') + preset.map(a => a.includes(' ') || a.includes('"') ? JSON.stringify(a) : a).join(' ');
   });
-  saveCfg(cfg);
-}
-document.getElementById('ec-settings-close').addEventListener('click', () => $settings.classList.add('ec-hidden'));
-$settings.addEventListener('click', e => { if (e.target === $settings) $settings.classList.add('ec-hidden'); });
-document.getElementById('cfg-fontsize').addEventListener('input', e => { cfg.fontSize = Number(e.target.value); document.getElementById('cfg-fontsize-val').textContent = cfg.fontSize; applyCfg(); });
-document.getElementById('cfg-theme').addEventListener('change', e => { cfg.theme = e.target.value; applyCfg(); });
+});
+$newSessionCreate?.addEventListener('click', () => {
+  if (nsActiveTab === 'resume') {
+    if (!nsResumeSelected) { alert('세션을 선택하세요'); return; }
+    const args = tokenizeArgs($('rs-args').value);
+    const home = $('rs-home').value || null;
+    sendWs({
+      op: 'resume_session', id: nextClientId++,
+      label: nsResumeSelected.title.slice(0, 24),
+      cwd: nsResumeSelected.cwd,
+      claudeId: nsResumeSelected.claudeId,
+      args, home,
+    });
+    hideNewSessionModal();
+    return;
+  }
+  const label = $nsLabel.value.trim();
+  const cwd = $nsCwd.value.trim();
+  const name = $nsName.value.trim() || null;
+  const args = tokenizeArgs($nsArgs.value);
+  const home = $('ns-home').value || null;
+  if (!label) { $nsLabel.focus(); return; }
+  if (!cwd)   { $nsCwd.focus();   return; }
+  sendWs({ op: 'create_session', id: nextClientId++, label, cwd, name, args, home });
+  hideNewSessionModal();
+});
 
-// ── Hamburger ────────────────────────────────────────────────────────────────
-document.getElementById('ec-ham').addEventListener('click', () => $nav.classList.toggle('open'));
+// 탭 전환
+document.querySelectorAll('.ec-ns-tab').forEach(t => {
+  t.addEventListener('click', () => {
+    setNsTab(t.dataset.tab);
+    if (t.dataset.tab === 'resume') searchHistory();
+  });
+});
+$('rs-cwd')?.addEventListener('input', scheduleSearch);
+$('rs-q')?.addEventListener('input', scheduleSearch);
 
-// ── Utils ────────────────────────────────────────────────────────────────────
-function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function parseSeq(s) {
-  return s.replace(/\\x([0-9a-fA-F]{2})/g, (_,h) => String.fromCharCode(parseInt(h,16)))
-          .replace(/\\u([0-9a-fA-F]{4})/g, (_,h) => String.fromCharCode(parseInt(h,16)))
-          .replace(/\\n/g,'\n').replace(/\\r/g,'\r').replace(/\\t/g,'\t');
-}
-
-// ── Init ─────────────────────────────────────────────────────────────────────
+// ── 시작 ──────────────────────────────────────────────────────────────────────
 applyCfg();
+loadClaudeOptions();
 connect();

@@ -1,1 +1,12 @@
-node_modules/\n*.log\n.env
+node_modules/
+*.log
+.env
+*.state.json
+.DS_Store
+.vscode/
+.idea/
+/dist/
+/build/
+
+# legacy / dev state (사용자별 데이터, 레포 미포함)
+/examples/*/easyclaude.config.state.json

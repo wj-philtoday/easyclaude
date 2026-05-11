@@ -4,64 +4,197 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>easyclaude</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body class="ec-body">
 <div id="ec-shell">
 
-  <!-- 사이드 탭 (wide) / 상단 햄버거 (narrow) -->
+  <!-- 사이드 탭 -->
   <nav id="ec-nav" class="ec-nav">
     <div class="ec-nav-header">
-      <span class="ec-logo">easyclaude</span>
+      <span id="ec-logo" class="ec-logo-mark" aria-hidden="true"></span>
+      <span id="ec-title" class="ec-title">easyclaude</span>
       <button id="ec-ham" class="ec-icon-btn">☰</button>
     </div>
     <div id="ec-tabs" class="ec-tabs"></div>
     <div class="ec-nav-footer">
+      <button id="ec-new-session-btn" class="ec-icon-btn ec-full">＋ 새 세션</button>
       <button id="ec-settings-btn" class="ec-icon-btn ec-full">⚙ 설정</button>
     </div>
   </nav>
 
   <!-- 메인 -->
   <main id="ec-main" class="ec-main">
-    <!-- 뷰 토글 바 -->
     <div id="ec-viewbar" class="ec-viewbar">
-      <button id="ec-view-raw" class="ec-view-btn active">RAW</button>
-      <button id="ec-view-parsed" class="ec-view-btn">PARSED</button>
-      <button id="ec-pause-btn" class="ec-view-btn" style="margin-left:4px">⏸</button>
-      <button id="ec-capture-btn" class="ec-view-btn" title="tmux 전체 스크롤백 캡처">↯</button>
-      <span id="ec-parse-status" class="ec-parse-status"></span>
+      <span id="ec-active-label" class="ec-active-label"></span>
+      <button id="ec-perm-pill" class="ec-perm-pill" title="권한 모드">🔒</button>
+      <button id="ec-info-btn" class="ec-icon-btn" title="세션 정보">ⓘ</button>
+      <span id="ec-status" class="ec-parse-status">connecting…</span>
     </div>
-    <!-- 터미널 출력 (RAW) -->
-    <div id="ec-terms" class="ec-terms"></div>
-    <!-- 파싱된 뷰 (PARSED) -->
-    <div id="ec-parsed-view" class="ec-parsed-view ec-hidden"></div>
+    <div id="ec-parsed-view" class="ec-parsed-view"></div>
 
     <!-- 하단 컨트롤 -->
     <div id="ec-bottom" class="ec-bottom">
-      <!-- 키 바 -->
-      <div id="ec-keybar" class="ec-keybar">
-        <button data-seq="\x15" title="Ctrl+U (줄 지우기)" style="color:#f38ba8">C-u</button>
-        <button data-seq="\x03" title="Ctrl+C">C-c</button>
-        <button data-seq="\x04" title="Ctrl+D">C-d</button>
-        <button data-seq="\x1a" title="Ctrl+Z">C-z</button>
-        <button data-seq="\x1b" title="Esc">Esc</button>
-        <button data-seq="\t"   title="Tab">Tab</button>
-        <button data-seq="\x1b[A" title="↑">↑</button>
-        <button data-seq="\x1b[B" title="↓">↓</button>
-        <button data-seq="\x1b[C" title="→">→</button>
-        <button data-seq="\x1b[D" title="←">←</button>
-        <button id="ec-mode-btn" class="ec-mode-cmd">CMD</button>
+      <div id="ec-actionbar" class="ec-actionbar">
+        <button id="ec-interrupt-btn" class="ec-action-btn" title="중단 (SIGINT)">⏹ 중단</button>
+        <button id="ec-restart-btn" class="ec-action-btn" title="세션 재기동">↻ 재기동</button>
+        <span id="ec-usage" class="ec-usage"></span>
       </div>
-      <!-- 입력창 -->
       <div id="ec-inputbar" class="ec-inputbar">
         <div id="ec-autocomplete" class="ec-autocomplete ec-hidden"></div>
-        <input id="ec-input" type="text" autocomplete="off" autocorrect="off"
-               autocapitalize="none" spellcheck="false" placeholder="메시지 입력…">
-        <button id="ec-send-btn" title="전송">↵</button>
+        <textarea id="ec-input" autocomplete="off" autocorrect="off"
+               autocapitalize="none" spellcheck="false" rows="2"
+               placeholder="메시지 입력… (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
+        <button id="ec-send-btn" title="전송" aria-label="전송">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 12h14M13 5l7 7-7 7"/>
+          </svg>
+        </button>
       </div>
     </div>
   </main>
+</div>
+
+<!-- 세션 정보 패널 (status / usage / mcp / agents / controls) -->
+<div id="ec-info" class="ec-dialog ec-hidden">
+  <div class="ec-dialog-panel">
+    <div class="ec-dialog-head">
+      <h3>세션 정보 — <span id="info-session-label"></span></h3>
+      <button id="info-close" class="ec-icon-btn">✕</button>
+    </div>
+    <div class="ec-dialog-body" id="info-body">
+      <!-- 동적 렌더 -->
+    </div>
+    <div class="ec-dialog-actions">
+      <button id="info-restart-apply" class="ec-btn ec-btn-primary">변경 사항 적용 (재기동)</button>
+      <button id="info-cancel" class="ec-btn">닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- Claude settings.json 편집 모달 -->
+<div id="ec-settings-edit" class="ec-dialog ec-hidden">
+  <div class="ec-dialog-panel">
+    <div class="ec-dialog-head">
+      <h3>settings.json — <span id="se-home-label"></span></h3>
+      <button id="se-close" class="ec-icon-btn">✕</button>
+    </div>
+    <div class="ec-dialog-body">
+      <label class="ec-field">
+        <span>JSON 내용 (저장 시 유효성 검사)</span>
+        <textarea id="se-content" rows="20" spellcheck="false"></textarea>
+      </label>
+      <small class="ec-field-hint">저장 후 실행 중 세션에 적용하려면 재기동 필요.</small>
+      <div id="se-message" class="ec-field-hint" style="color: var(--danger)"></div>
+    </div>
+    <div class="ec-dialog-actions">
+      <button id="se-cancel" class="ec-btn">취소</button>
+      <button id="se-save" class="ec-btn ec-btn-primary">저장</button>
+    </div>
+  </div>
+</div>
+
+<!-- AskUserQuestion 다이얼로그 -->
+<div id="ec-dialog" class="ec-dialog ec-hidden">
+  <div class="ec-dialog-panel">
+    <div class="ec-dialog-head">
+      <h3 id="ec-dialog-title">질문</h3>
+      <button id="ec-dialog-close" class="ec-icon-btn">✕</button>
+    </div>
+    <div id="ec-dialog-body" class="ec-dialog-body"></div>
+    <div class="ec-dialog-actions">
+      <button id="ec-dialog-cancel" class="ec-btn">취소</button>
+      <button id="ec-dialog-submit" class="ec-btn ec-btn-primary">전송</button>
+    </div>
+  </div>
+</div>
+
+<!-- 새 세션 / 부활 모달 -->
+<div id="ec-newsession" class="ec-dialog ec-hidden">
+  <div class="ec-dialog-panel">
+    <div class="ec-dialog-head">
+      <h3>새 세션</h3>
+      <button id="ec-newsession-close" class="ec-icon-btn">✕</button>
+    </div>
+    <div class="ec-ns-tabs">
+      <button class="ec-ns-tab active" data-tab="new">새 세션</button>
+      <button class="ec-ns-tab" data-tab="resume">기존 부활</button>
+    </div>
+    <div class="ec-dialog-body">
+
+      <!-- 새 세션 탭 -->
+      <div class="ec-ns-pane" data-pane="new">
+        <label class="ec-field">
+          <span>이름 (label)</span>
+          <input id="ns-label" type="text" placeholder="예: scratch">
+        </label>
+        <label class="ec-field">
+          <span>작업 디렉터리 (cwd)</span>
+          <input id="ns-cwd" type="text" placeholder="/home/team-pm/...">
+        </label>
+        <label class="ec-field">
+          <span>Claude home (.claude 위치)</span>
+          <select id="ns-home"><option value="">기본 (현재 HOME)</option></select>
+        </label>
+        <label class="ec-field">
+          <span>표시 이름 (--name, 옵션)</span>
+          <input id="ns-name" type="text" placeholder="선택 사항">
+        </label>
+        <label class="ec-field">
+          <span>추가 인자 (defaultArgs 뒤에 붙음)</span>
+          <textarea id="ns-args" rows="3" placeholder='예: --permission-mode bypassPermissions --model sonnet[1M]'></textarea>
+          <small class="ec-field-hint">공백/줄바꿈으로 토큰 분리. 따옴표로 감싼 값 허용.</small>
+        </label>
+        <details class="ec-newsession-preset">
+          <summary>프리셋</summary>
+          <div class="ec-preset-buttons">
+            <button type="button" data-preset="bypass">권한 우회</button>
+            <button type="button" data-preset="prompt">권한 확인 (easypermitter)</button>
+            <button type="button" data-preset="opus1m">Opus 1M</button>
+            <button type="button" data-preset="sonnet1m">Sonnet 1M</button>
+          </div>
+        </details>
+      </div>
+
+      <!-- 부활 탭 -->
+      <div class="ec-ns-pane ec-hidden" data-pane="resume">
+        <label class="ec-field">
+          <span>Claude home</span>
+          <select id="rs-home"><option value="">기본 (현재 HOME)</option></select>
+        </label>
+        <label class="ec-field">
+          <span>cwd 필터 (비우면 전체)</span>
+          <input id="rs-cwd" type="text" placeholder="/home/team-pm">
+        </label>
+        <label class="ec-field">
+          <span>검색어 (제목/첫 메시지)</span>
+          <input id="rs-q" type="text" placeholder="키워드">
+        </label>
+        <div class="ec-rs-list-wrap">
+          <div id="rs-list" class="ec-rs-list"><div class="ec-empty">검색 필요</div></div>
+        </div>
+        <label class="ec-field" style="margin-top:14px">
+          <span>플래그 (resume 시 새로 부여)</span>
+          <textarea id="rs-args" rows="3" placeholder='예: --permission-mode bypassPermissions --model sonnet[1M]'></textarea>
+          <small class="ec-field-hint">resume은 대화만 계승. 모델/권한 플래그는 새로 붙여야 함.</small>
+        </label>
+        <details class="ec-newsession-preset">
+          <summary>프리셋</summary>
+          <div class="ec-preset-buttons">
+            <button type="button" data-preset="bypass" data-target="rs-args">권한 우회</button>
+            <button type="button" data-preset="prompt" data-target="rs-args">권한 확인</button>
+            <button type="button" data-preset="opus1m" data-target="rs-args">Opus 1M</button>
+            <button type="button" data-preset="sonnet1m" data-target="rs-args">Sonnet 1M</button>
+          </div>
+        </details>
+      </div>
+
+    </div>
+    <div class="ec-dialog-actions">
+      <button id="ec-newsession-cancel" class="ec-btn">취소</button>
+      <button id="ec-newsession-create" class="ec-btn ec-btn-primary">생성</button>
+    </div>
+  </div>
 </div>
 
 <!-- 설정 패널 -->
@@ -72,25 +205,111 @@
       <button id="ec-settings-close" class="ec-icon-btn">✕</button>
     </div>
     <div class="ec-settings-body">
-      <label>폰트 크기
-        <input id="cfg-fontsize" type="range" min="8" max="24" value="13">
-        <span id="cfg-fontsize-val">13</span>px
-      </label>
-      <label>테마
-        <select id="cfg-theme">
-          <option value="dark">Dark</option>
-          <option value="light">Light</option>
-          <option value="solarized">Solarized</option>
-          <option value="monokai">Monokai</option>
-        </select>
-      </label>
+
+      <section class="ec-settings-section">
+        <h4>외관</h4>
+        <label class="ec-field">
+          <span>폰트 크기 <small id="cfg-fontsize-val">14</small>px</span>
+          <input id="cfg-fontsize" type="range" min="10" max="20" value="14">
+        </label>
+        <label class="ec-field">
+          <span>모드</span>
+          <select id="cfg-theme">
+            <option value="auto">자동 (시스템)</option>
+            <option value="light">라이트</option>
+            <option value="dark">다크</option>
+          </select>
+        </label>
+        <label class="ec-field">
+          <span>테마 프리셋</span>
+          <select id="cfg-theme-preset">
+            <option value="default">기본</option>
+            <option value="philtoday">PhilToday</option>
+            <option value="custom">커스텀</option>
+          </select>
+        </label>
+        <label class="ec-field">
+          <span>로고</span>
+          <select id="cfg-logo-preset">
+            <option value="default">기본</option>
+            <option value="philtoday">PhilToday</option>
+            <option value="custom">커스텀 SVG</option>
+            <option value="none">없음</option>
+          </select>
+        </label>
+        <label class="ec-field">
+          <span>타이틀 텍스트 (override, 비우면 프리셋 기본값)</span>
+          <input id="cfg-title-text" type="text" placeholder="비우면 기본값">
+        </label>
+      </section>
+
+      <section class="ec-settings-section">
+        <h4>안전</h4>
+        <label class="ec-field" style="flex-direction:row;align-items:center;gap:10px">
+          <input id="cfg-bypass-enabled" type="checkbox" style="width:auto">
+          <span style="flex:1;margin-bottom:0">위험 모드 허용 (bypassPermissions 옵션 노출)</span>
+        </label>
+        <small class="ec-field-hint">활성화 시 세션 제어 / 새 세션 모달에서 bypassPermissions 선택 가능 + 상태바에서 빠른 토글.</small>
+      </section>
+
+      <section class="ec-settings-section ec-hidden" id="ec-settings-custom">
+        <h4>커스텀 테마</h4>
+        <label class="ec-field">
+          <span>다크 모드 여부</span>
+          <select id="cfg-custom-mode">
+            <option value="light">라이트 (기본)</option>
+            <option value="dark">다크</option>
+          </select>
+        </label>
+        <label class="ec-field">
+          <span>배경 (bg)</span>
+          <input id="cfg-color-bg" type="text" placeholder="#FAF6F0">
+        </label>
+        <label class="ec-field">
+          <span>표면 (surface)</span>
+          <input id="cfg-color-surface" type="text" placeholder="#FFFFFF">
+        </label>
+        <label class="ec-field">
+          <span>텍스트 (text)</span>
+          <input id="cfg-color-text" type="text" placeholder="#1E1A14">
+        </label>
+        <label class="ec-field">
+          <span>강조 (accent)</span>
+          <input id="cfg-color-accent" type="text" placeholder="#C25A2C">
+        </label>
+        <label class="ec-field">
+          <span>테두리 (border)</span>
+          <input id="cfg-color-border" type="text" placeholder="#E0D7C5">
+        </label>
+        <small class="ec-field-hint">비워두면 기본 테마 값 사용. 더 세부 토큰은 추후 지원.</small>
+      </section>
+
+      <section class="ec-settings-section ec-hidden" id="ec-settings-logo-custom">
+        <h4>커스텀 로고</h4>
+        <label class="ec-field">
+          <span>SVG 원문 (currentColor 권장)</span>
+          <textarea id="cfg-custom-svg" rows="5" placeholder='<svg viewBox="0 0 24 24" ...>...</svg>'></textarea>
+          <small class="ec-field-hint">currentColor 사용 시 테마 accent 색을 따라감.</small>
+        </label>
+      </section>
+
+      <section class="ec-settings-section">
+        <h4>Claude 인증 / 설정</h4>
+        <div id="cfg-homes-list" class="ec-homes-list">
+          <div class="ec-empty">로드 중…</div>
+        </div>
+      </section>
+
+      <section class="ec-settings-section">
+        <div class="ec-settings-actions">
+          <button id="cfg-reset" class="ec-btn">기본값으로</button>
+        </div>
+      </section>
+
     </div>
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
-<script src="app.js?v=1778423030"></script>
+<script src="app.js?v=20260511h"></script>
 </body>
 </html>

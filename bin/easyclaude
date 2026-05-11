@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# easyclaude entrypoint
+#   환경변수:
+#     EASYCLAUDE_CONFIG  config.json 절대경로 (없으면 XDG → /etc 순)
+#     EASYCLAUDE_STATE   state.json 절대경로
+#     PORT, HOST         서버 listen
+set -e
+HERE="$(dirname "$(readlink -f "$0")")"
+ROOT="$(dirname "$HERE")"
+exec node "$ROOT/server/index.js" "$@"

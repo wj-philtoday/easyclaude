@@ -1,16 +1,32 @@
 {
   "name": "easyclaude",
-  "version": "0.1.0",
-  "description": "A web harness overlay for Claude Code — ANSI-native, buffer-parsed UI",
+  "version": "0.2.0",
+  "description": "Claude Code stream-json GUI — multi-session web UI with permission dialogs, resume search, themes.",
   "main": "server/index.js",
+  "bin": {
+    "easyclaude": "bin/easyclaude",
+    "easyclaude-tail": "bin/easyclaude-tail"
+  },
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js"
   },
-  "keywords": ["claude", "claude-code", "terminal", "xterm", "websocket"],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "stream-json",
+    "websocket",
+    "mcp"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wj-philtoday/easyclaude"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "node-pty": "*",
-    "ws": "*"
+    "ws": "^8.18.0"
   }
 }
