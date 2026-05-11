@@ -7,6 +7,7 @@ const $parsed = $('ec-parsed-view');
 const $input = $('ec-input');
 const $send = $('ec-send-btn');
 const $interrupt = $('ec-interrupt-btn');
+const $interrupt = $('ec-interrupt-btn');
 const $restart = $('ec-restart-btn');
 const $usage = $('ec-usage');
 const $ham = $('ec-ham');
@@ -708,6 +709,18 @@ function autosize() {
 }
 
 $send.addEventListener('click', sendInput);
+$interrupt?.addEventListener('click', () => {
+  const ch = activeChannel();
+  if (!ch) return;
+  sendWs({ op: 'interrupt', id: ch.id });
+});
+// Escape 키: 입력칸이 비어있을 때만 인터럽트로 (포커스 있는 곳 텍스트 입력 중이면 무시)
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && (!$input.value || document.activeElement !== $input)) {
+    const ch = activeChannel();
+    if (ch) sendWs({ op: 'interrupt', id: ch.id });
+  }
+});
 $input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
@@ -1191,7 +1204,9 @@ async function renderHomesList() {
             <span>${writable ? '✏️ 쓰기 가능' : '🔒 읽기 전용'}</span>
           </div>
           <div class="ec-home-actions">
-            <button class="ec-btn ec-home-edit" data-home="${esc(h.home)}" ${writable ? '' : 'disabled'}>settings.json 편집</button>
+            <button class="ec-btn ec-home-edit" data-home="${esc(h.home)}">settings.json 편집</button>
+            <button class="ec-btn ec-home-login" data-home="${esc(h.home)}">로그인</button>
+            <button class="ec-btn ec-home-logout" data-home="${esc(h.home)}">로그아웃</button>
             <button class="ec-btn ec-home-tail-cmd" data-home="${esc(h.home)}">jsonl 위치</button>
           </div>
         </div>`;
@@ -1217,6 +1232,14 @@ async function renderHomesList() {
     $list.querySelectorAll('.ec-home-tail-cmd').forEach(b => {
       b.addEventListener('click', () => showJsonlPath(b.dataset.home));
     });
+    // 로그인
+    $list.querySelectorAll('.ec-home-login').forEach(b => {
+      b.addEventListener('click', () => openLogin(b.dataset.home));
+    });
+    // 로그아웃
+    $list.querySelectorAll('.ec-home-logout').forEach(b => {
+      b.addEventListener('click', () => doLogout(b.dataset.home));
+    });
   } catch (e) {
     $list.innerHTML = '<div class="ec-empty">로드 실패: ' + esc(e.message) + '</div>';
   }
@@ -1235,6 +1258,86 @@ async function openSettingsEdit(home) {
     $('se-content').value = data.content;
   } catch (e) {
     $('se-message').textContent = '로드 실패: ' + e.message;
+  }
+}
+
+// ── Auth login/logout ────────────────────────────────────────────────────────
+let lgPollTimer = null;
+function openLogin(home) {
+  $('lg-home-label').textContent = home;
+  $('ec-login').dataset.home = home;
+  $('lg-step1').classList.remove('ec-hidden');
+  $('lg-step2').classList.add('ec-hidden');
+  $('lg-message').textContent = '';
+  $('lg-url').value = '';
+  $('lg-status').textContent = '대기 중…';
+  $('ec-login').classList.remove('ec-hidden');
+}
+$('lg-close')?.addEventListener('click', () => {
+  if (lgPollTimer) { clearInterval(lgPollTimer); lgPollTimer = null; }
+  $('ec-login').classList.add('ec-hidden');
+});
+$('lg-start')?.addEventListener('click', async () => {
+  const home = $('ec-login').dataset.home;
+  const method = $('lg-method').value;
+  const email = $('lg-email').value.trim();
+  $('lg-message').textContent = '';
+  try {
+    const r = await fetch(apiBase() + 'api/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ method, email: email || undefined, home }),
+    });
+    const data = await r.json();
+    if (!data.ok) { $('lg-message').textContent = data.error || '로그인 시작 실패'; return; }
+    $('lg-step1').classList.add('ec-hidden');
+    $('lg-step2').classList.remove('ec-hidden');
+    if (data.url) { $('lg-url').value = data.url; }
+    else { $('lg-status').textContent = 'URL을 받지 못함 (CLI 출력 확인 필요) — 폴링 시작'; }
+    // polling
+    if (lgPollTimer) clearInterval(lgPollTimer);
+    lgPollTimer = setInterval(async () => {
+      try {
+        const r2 = await fetch(apiBase() + 'api/auth/login-status?home=' + encodeURIComponent(home));
+        const s = await r2.json();
+        if (s.url && !$('lg-url').value) $('lg-url').value = s.url;
+        $('lg-status').textContent = `상태: ${s.status}${s.exitCode !== null && s.exitCode !== undefined ? ` (exit ${s.exitCode})` : ''}`;
+        if (s.status === 'success') {
+          clearInterval(lgPollTimer); lgPollTimer = null;
+          $('lg-status').textContent = '✅ 로그인 완료';
+          setTimeout(() => { $('ec-login').classList.add('ec-hidden'); renderHomesList(); }, 1200);
+        } else if (s.status === 'failed' || s.status === 'killed') {
+          clearInterval(lgPollTimer); lgPollTimer = null;
+          $('lg-message').textContent = `실패: ${s.error || s.output || s.status}`;
+        }
+      } catch (e) {}
+    }, 1500);
+  } catch (e) {
+    $('lg-message').textContent = '오류: ' + e.message;
+  }
+});
+$('lg-open')?.addEventListener('click', () => {
+  const url = $('lg-url').value;
+  if (url) window.open(url, '_blank', 'noopener');
+});
+$('lg-copy')?.addEventListener('click', () => {
+  const url = $('lg-url').value;
+  if (url) navigator.clipboard?.writeText(url);
+});
+
+async function doLogout(home) {
+  if (!confirm(`${home}에서 로그아웃할까요?`)) return;
+  try {
+    const r = await fetch(apiBase() + 'api/auth/logout', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ home }),
+    });
+    const data = await r.json();
+    if (!data.ok) { alert('로그아웃 실패: ' + (data.stderr || 'unknown')); return; }
+    renderHomesList();
+  } catch (e) {
+    alert('오류: ' + e.message);
   }
 }
 
@@ -1259,10 +1362,12 @@ $('se-cancel')?.addEventListener('click', () => $('ec-settings-edit').classList.
 $('se-save')?.addEventListener('click', async () => {
   const home = $('ec-settings-edit').dataset.home;
   const content = $('se-content').value;
+  const force = $('se-force')?.checked;
   $('se-message').textContent = '저장 중…';
   $('se-message').style.color = 'var(--text-2)';
   try {
-    const r = await fetch(apiBase() + 'api/claude-settings?home=' + encodeURIComponent(home), {
+    const url = 'api/claude-settings?home=' + encodeURIComponent(home) + (force ? '&force=1' : '');
+    const r = await fetch(apiBase() + url, {
       method: 'PUT',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ content }),

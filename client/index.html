@@ -45,6 +45,11 @@
         <textarea id="ec-input" autocomplete="off" autocorrect="off"
                autocapitalize="none" spellcheck="false" rows="2"
                placeholder="메시지 입력… (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
+        <button id="ec-interrupt-btn" title="중단 (ESC)" aria-label="중단" style="margin-right:4px">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="6" y="6" width="12" height="12" rx="2"/>
+          </svg>
+        </button>
         <button id="ec-send-btn" title="전송" aria-label="전송">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M5 12h14M13 5l7 7-7 7"/>
@@ -84,12 +89,52 @@
         <span>JSON 내용 (저장 시 유효성 검사)</span>
         <textarea id="se-content" rows="20" spellcheck="false"></textarea>
       </label>
+      <label class="ec-field" style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="se-force"> <span>관리자 권한으로 강제 저장 (sudo, 권한 거부 시)</span>
+      </label>
       <small class="ec-field-hint">저장 후 실행 중 세션에 적용하려면 재기동 필요.</small>
       <div id="se-message" class="ec-field-hint" style="color: var(--danger)"></div>
     </div>
     <div class="ec-dialog-actions">
       <button id="se-cancel" class="ec-btn">취소</button>
       <button id="se-save" class="ec-btn ec-btn-primary">저장</button>
+    </div>
+  </div>
+</div>
+
+<!-- Login 모달 -->
+<div id="ec-login" class="ec-dialog ec-hidden">
+  <div class="ec-dialog-panel" style="max-width:520px">
+    <div class="ec-dialog-head">
+      <h3>Claude 로그인 — <span id="lg-home-label"></span></h3>
+      <button id="lg-close" class="ec-icon-btn">✕</button>
+    </div>
+    <div class="ec-dialog-body">
+      <label class="ec-field">
+        <span>인증 방식</span>
+        <select id="lg-method">
+          <option value="claudeai" selected>Claude subscription (claude.ai)</option>
+          <option value="console">Anthropic Console (API)</option>
+          <option value="sso">SSO</option>
+        </select>
+      </label>
+      <label class="ec-field">
+        <span>이메일 (선택, claude.ai/SSO 미리 채움)</span>
+        <input id="lg-email" type="email" placeholder="you@example.com">
+      </label>
+      <div id="lg-step1">
+        <button id="lg-start" class="ec-btn ec-btn-primary" style="width:100%">로그인 시작</button>
+      </div>
+      <div id="lg-step2" class="ec-hidden">
+        <p>아래 URL을 새 탭에서 열고 OAuth 완료하세요:</p>
+        <div style="display:flex;gap:6px;align-items:center;margin:8px 0">
+          <input id="lg-url" readonly style="flex:1;font-size:11px">
+          <button id="lg-open" class="ec-btn">새 탭</button>
+          <button id="lg-copy" class="ec-btn">복사</button>
+        </div>
+        <div id="lg-status" class="ec-field-hint">대기 중…</div>
+      </div>
+      <div id="lg-message" class="ec-field-hint" style="color: var(--danger)"></div>
     </div>
   </div>
 </div>
