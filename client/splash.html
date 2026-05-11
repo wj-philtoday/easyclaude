@@ -9,55 +9,258 @@
     --bg: #faf7f2;
     --fg: #2c2a25;
     --accent: #e07856;
+    --accent-soft: #f4d8cc;
     --muted: #8a8275;
     --card: #fff;
+    --card-soft: #f6f1e8;
     --border: #ece6dc;
+    --ok: #4a9d6b;
+    --warn: #d4a93a;
+    --err: #c25450;
+    --shadow: 0 2px 24px rgba(0,0,0,0.04);
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#1a1815; --fg:#e8e3d8; --accent:#e89678; --muted:#9a9080; --card:#252220; --border:#3a342e; }
+    :root {
+      --bg:#1a1815; --fg:#e8e3d8; --accent:#e89678; --accent-soft:#4a2e26;
+      --muted:#9a9080; --card:#252220; --card-soft:#1f1c19; --border:#3a342e;
+      --ok:#6fbd8a; --warn:#e2c25a; --err:#d97670;
+      --shadow: 0 2px 24px rgba(0,0,0,0.2);
+    }
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-  .wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 32px; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 48px 56px; max-width: 480px; width: 100%; box-shadow: 0 2px 24px rgba(0,0,0,0.04); }
-  h1 { margin: 0 0 8px 0; font-size: 28px; font-weight: 600; letter-spacing: -0.02em; }
-  .subtitle { color: var(--muted); margin: 0 0 32px 0; font-size: 14px; }
-  .status { display: flex; align-items: center; gap: 12px; padding: 16px; background: var(--bg); border-radius: 10px; margin-bottom: 16px; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
-  .label { font-size: 14px; }
-  .meta { color: var(--muted); font-size: 12px; margin-top: 24px; font-family: ui-monospace, monospace; }
-  .meta b { color: var(--fg); font-weight: 500; }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", sans-serif;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 32px 24px 64px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 28px; }
+  h1 { margin: 0; font-size: 28px; font-weight: 600; letter-spacing: -0.02em; }
+  .subtitle { color: var(--muted); margin: 0; font-size: 14px; }
+  .health { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); animation: pulse 1.6s ease-in-out infinite; }
+  .dot.err { background: var(--err); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 20px 22px; box-shadow: var(--shadow);
+  }
+  .card h2 { margin: 0 0 14px 0; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+  /* Stats */
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .stat { text-align: center; padding: 12px 6px; background: var(--card-soft); border-radius: 10px; }
+  .stat-val { font-size: 24px; font-weight: 600; color: var(--accent); line-height: 1.1; }
+  .stat-label { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  /* Auth */
+  .auth-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 13px; }
+  .auth-row + .auth-row { border-top: 1px dashed var(--border); }
+  .auth-key { color: var(--muted); }
+  .auth-val { font-weight: 500; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; background: var(--accent-soft); color: var(--accent); }
+  .badge.ok { background: var(--accent-soft); color: var(--accent); }
+  .badge.warn { background: rgba(212,169,58,0.15); color: var(--warn); }
+
+  /* Sessions */
+  .sess-list { display: flex; flex-direction: column; gap: 8px; }
+  .sess {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 14px; background: var(--card-soft); border: 1px solid transparent;
+    border-radius: 10px; text-decoration: none; color: var(--fg);
+    transition: border-color 0.15s, transform 0.05s;
+  }
+  .sess:hover { border-color: var(--accent); text-decoration: none; }
+  .sess:active { transform: scale(0.99); }
+  .sess-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .sess-label { font-weight: 500; font-size: 14px; }
+  .sess-id { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+  .sess-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .sess-status { font-size: 11px; color: var(--muted); }
+  .sess-status.alive { color: var(--ok); }
+  .empty { color: var(--muted); font-size: 13px; padding: 16px; text-align: center; background: var(--card-soft); border-radius: 10px; }
+
+  /* Actions */
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn {
+    flex: 1; min-width: 120px; padding: 12px 16px; border-radius: 10px;
+    font-size: 14px; font-weight: 500; cursor: pointer;
+    border: 1px solid var(--border); background: var(--card); color: var(--fg);
+    text-decoration: none; text-align: center;
+    transition: background 0.15s, border-color 0.15s, transform 0.05s;
+  }
+  .btn:hover { border-color: var(--accent); text-decoration: none; }
+  .btn:active { transform: scale(0.98); }
+  .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn.primary:hover { background: #d06a48; border-color: #d06a48; }
+  @media (prefers-color-scheme: dark) {
+    .btn.primary:hover { background: #f0a78a; border-color: #f0a78a; }
+  }
+
+  .login-prompt {
+    padding: 14px; border-radius: 10px; background: rgba(212,169,58,0.1);
+    border: 1px solid rgba(212,169,58,0.3); color: var(--fg); font-size: 13px;
+  }
+  .login-prompt a { color: var(--warn); font-weight: 500; }
+
+  footer { margin-top: 24px; text-align: center; color: var(--muted); font-size: 11px; font-family: ui-monospace, monospace; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <div class="card">
-    <h1>easyclaude</h1>
-    <p class="subtitle">Claude Code stream-json GUI</p>
-    <div class="status">
-      <div class="dot"></div>
-      <div class="label" id="status-label">로딩 중…</div>
+  <header>
+    <div>
+      <h1>easyclaude</h1>
+      <p class="subtitle">Claude Code stream-json GUI</p>
     </div>
-    <div class="meta" id="meta">—</div>
-    <p style="margin-top:24px"><a href="/">→ 콘솔 열기</a></p>
+    <div class="health" id="health">
+      <span class="dot" id="health-dot"></span>
+      <span id="health-text">연결 중…</span>
+    </div>
+  </header>
+
+  <!-- Quick stats -->
+  <div class="card" style="margin-bottom: 16px;">
+    <h2>현황</h2>
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-val" id="stat-total">—</div>
+        <div class="stat-label">전체 세션</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val" id="stat-alive">—</div>
+        <div class="stat-label">활성 세션</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val" id="stat-agent" style="font-size: 14px; padding-top: 6px;">—</div>
+        <div class="stat-label">로그인 에이전트</div>
+      </div>
+    </div>
   </div>
+
+  <div class="grid">
+    <!-- Auth card -->
+    <div class="card">
+      <h2>인증 상태</h2>
+      <div id="auth-body">
+        <div class="empty">불러오는 중…</div>
+      </div>
+    </div>
+
+    <!-- Sessions card -->
+    <div class="card">
+      <h2>세션 목록</h2>
+      <div id="sess-body" class="sess-list">
+        <div class="empty">불러오는 중…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Action bar -->
+  <div class="card">
+    <h2>바로가기</h2>
+    <div class="actions">
+      <a class="btn primary" href="/">콘솔 열기</a>
+      <a class="btn" href="/?new=1" id="btn-new">새 세션</a>
+      <a class="btn" href="/?login=1" id="btn-login">로그인</a>
+    </div>
+  </div>
+
+  <footer id="footer">—</footer>
 </div>
+
 <script>
+const $ = (id) => document.getElementById(id);
+
+function setHealth(state, text) {
+  const dot = $('health-dot');
+  dot.className = 'dot ' + (state || '');
+  $('health-text').textContent = text;
+}
+
+function renderAuth(doc) {
+  const body = $('auth-body');
+  const a = (doc && doc.auth) || null;
+  if (!a || !a.loggedIn) {
+    body.innerHTML = `
+      <div class="login-prompt">
+        로그인되어 있지 않습니다.<br>
+        <a href="/?login=1">콘솔에서 로그인 →</a>
+      </div>`;
+    $('stat-agent').textContent = '—';
+    return;
+  }
+  const subBadge = a.subscriptionType
+    ? `<span class="badge ok">${a.subscriptionType}</span>` : '';
+  body.innerHTML = `
+    <div class="auth-row"><span class="auth-key">이메일</span><span class="auth-val">${a.email || '—'}</span></div>
+    <div class="auth-row"><span class="auth-key">조직</span><span class="auth-val">${a.orgName || '—'}</span></div>
+    <div class="auth-row"><span class="auth-key">플랜</span><span class="auth-val">${subBadge || '—'}</span></div>
+    <div class="auth-row"><span class="auth-key">인증</span><span class="auth-val">${a.authMethod || '—'}</span></div>
+    <div class="auth-row"><span class="auth-key">Claude</span><span class="auth-val">${(doc && doc.claudeVersion) ? doc.claudeVersion.replace(/\s*\(.*\)$/, '') : '—'}</span></div>
+  `;
+  $('stat-agent').textContent = a.email || '—';
+}
+
+function renderSessions(sessions) {
+  const body = $('sess-body');
+  if (!sessions || !sessions.length) {
+    body.innerHTML = '<div class="empty">세션 없음 — "새 세션"으로 시작하세요</div>';
+    $('stat-total').textContent = '0';
+    $('stat-alive').textContent = '0';
+    return;
+  }
+  $('stat-total').textContent = sessions.length;
+  $('stat-alive').textContent = sessions.filter(s => s.alive).length;
+  body.innerHTML = sessions.map(s => {
+    const alive = s.alive;
+    const label = s.label || s.id;
+    const signedIn = s.signedInAs ? ` · ${s.signedInAs}` : '';
+    return `
+      <a class="sess" href="/?session=${encodeURIComponent(s.id)}">
+        <div class="sess-main">
+          <div class="sess-label">${label}${signedIn}</div>
+          <div class="sess-id">${s.id}</div>
+        </div>
+        <div class="sess-right">
+          <span class="sess-status ${alive ? 'alive' : ''}">${alive ? '● alive' : '○ dormant'}</span>
+        </div>
+      </a>`;
+  }).join('');
+}
+
+async function fetchStatus() {
+  const r = await fetch('/api/status');
+  if (!r.ok) throw new Error('status ' + r.status);
+  return r.json();
+}
+async function fetchDoctor() {
+  try {
+    const r = await fetch('/api/slash/doctor');
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
 async function refresh() {
   try {
-    const r = await fetch('/api/status');
-    const j = await r.json();
-    document.getElementById('status-label').textContent = j.ok ? '준비됨' : '응답 없음';
-    const sessLines = (j.sessions||[]).map(s => `  ${s.id}: ${s.alive?'alive':'dormant'}${s.signedInAs?' ('+s.signedInAs+')':''}`).join('\n');
-    document.getElementById('meta').innerHTML = `<b>v${j.version}</b> @ ${j.host}:${j.port}<br>sessions:<br><pre style="margin:4px 0;font-size:11px">${sessLines||'(none)'}</pre>`;
+    const [status, doctor] = await Promise.all([fetchStatus(), fetchDoctor()]);
+    setHealth(status.ok ? 'ok' : 'err', status.ok ? '준비됨' : '응답 없음');
+    renderSessions(status.sessions || []);
+    renderAuth(doctor);
+    $('footer').textContent = `v${status.version} · ${status.host}:${status.port} · ${new Date().toLocaleTimeString('ko-KR')}`;
   } catch (e) {
-    document.getElementById('status-label').textContent = 'ec 미응답';
+    setHealth('err', 'ec 미응답');
+    $('footer').textContent = String(e);
   }
 }
+
 refresh();
 setInterval(refresh, 3000);
 </script>

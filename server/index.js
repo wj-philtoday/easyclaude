@@ -746,6 +746,47 @@ const server = http.createServer((req, res) => {
       return res.end(JSON.stringify({ ok: r.status === 0, stdout: r.stdout, stderr: r.stderr, home }));
     });
   }
+  // /api/auth/models?home=... — auth 방식 보고 사용 가능한 모델 후보 반환
+  // 하드코딩 피하기 위해 claude --help 추출 + auth status 기반.
+  if (req.url.startsWith('/api/auth/models')) {
+    const u = new URL(req.url, 'http://x');
+    const home = u.searchParams.get('home') || process.env.HOME;
+    const { spawnSync } = require('child_process');
+    const auth = spawnSync('claude', ['auth', 'status', '--json'], {
+      env: { ...process.env, HOME: home }, timeout: 5000, encoding: 'utf8',
+    });
+    let authParsed = null;
+    try { authParsed = JSON.parse(auth.stdout); } catch {}
+    // claude --help에서 --model 행을 찾으면 거기에 모델 enum이 박혀있을 수 있음
+    const help = spawnSync('claude', ['--help'], { timeout: 3000, encoding: 'utf8' });
+    let modelHelp = '';
+    if (help.stdout) {
+      const m = help.stdout.match(/-m,\s+--model\s+<model>\s+([^\n]+)/);
+      if (m) modelHelp = m[1];
+    }
+    // auth 방식별 일반적 후보 (subscription tier에 따라 가용성 다를 수 있음; 최종 결정은 사용자)
+    const subscription = authParsed && authParsed.subscriptionType;
+    let candidates = [];
+    if (authParsed && authParsed.loggedIn) {
+      if (authParsed.authMethod === 'claude.ai') {
+        // Pro/Team/Enterprise 모두 일반적으로 사용 가능한 별칭
+        candidates = ['opus', 'sonnet', 'haiku'];
+      } else if (authParsed.authMethod === 'console' || authParsed.apiProvider === 'firstParty') {
+        // API 명시적 모델 ID
+        candidates = ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'];
+      }
+    }
+    res.writeHead(200, {'Content-Type':'application/json'});
+    return res.end(JSON.stringify({
+      ok: true,
+      authMethod: authParsed && authParsed.authMethod,
+      subscriptionType: subscription,
+      loggedIn: authParsed && authParsed.loggedIn,
+      candidates,
+      modelHelp,
+      note: '실제 사용 가능 모델은 구독 등급/API 키 권한에 따라 다를 수 있음. 자유 입력 가능.',
+    }));
+  }
   if (req.url.startsWith('/api/auth/setup-token')) {
     if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
     return readJsonBody(req, (err, body) => {
