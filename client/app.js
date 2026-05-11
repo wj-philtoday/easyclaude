@@ -796,17 +796,69 @@ async function showJsonlHistory(sid) {
     }
   };
 }
+function jhTruncate(s, n) {
+  if (!s) return '';
+  s = String(s);
+  if (s.length <= n) return s;
+  return s.slice(0, n) + ` …(+${s.length - n} chars)`;
+}
+function jhContentText(c) {
+  if (!c) return '';
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) return c.map(jhContentText).join('\n');
+  if (c.type === 'text') return c.text || '';
+  if (c.type === 'thinking') return c.thinking || c.text || '';
+  if (c.text) return c.text;
+  return '';
+}
+function jhTurn(label, klass, body) {
+  return `<div class="ec-turn"><div class="ec-turn-label">${esc(label)}</div><div class="ec-turn-body ${klass}"><pre style="white-space:pre-wrap;margin:0;font-family:inherit">${esc(body)}</pre></div></div>`;
+}
+function jhRenderEntry(e) {
+  if (!e || typeof e !== 'object') return '';
+  if (e._parseError) return jhTurn('⚠ 파싱 실패', 'other', e.raw || '');
+  const t = e.type;
+  const cs = e.message && e.message.content;
+  if (t === 'user' && Array.isArray(cs)) {
+    const parts = [];
+    for (const c of cs) {
+      if (c.type === 'tool_result') {
+        const txt = (Array.isArray(c.content) ? c.content.map(jhContentText).join('\n')
+                    : (typeof c.content === 'string' ? c.content : JSON.stringify(c.content)));
+        parts.push(jhTurn(`📦 tool_result${c.is_error ? ' (error)' : ''}`, 'tool_out', jhTruncate(txt, 2000)));
+      } else if (c.type === 'text') {
+        parts.push(jhTurn('🙋 사용자', 'human', jhTruncate(c.text || '', 6000)));
+      } else {
+        parts.push(jhTurn(`user · ${c.type}`, 'other', jhTruncate(JSON.stringify(c), 600)));
+      }
+    }
+    return parts.join('');
+  }
+  if (t === 'assistant' && Array.isArray(cs)) {
+    return cs.map(c => {
+      if (c.type === 'text')     return jhTurn('🤖 어시스턴트', 'assistant', jhTruncate(c.text || '', 6000));
+      if (c.type === 'tool_use') return jhTurn(`🔧 ${c.name || 'tool'}`, 'tool_call', jhTruncate(JSON.stringify(c.input || {}, null, 2), 1500));
+      if (c.type === 'thinking') return jhTurn('💭 thinking', 'thinking', jhTruncate(c.thinking || c.text || '', 3000));
+      return jhTurn(`assistant · ${c.type}`, 'other', jhTruncate(JSON.stringify(c), 600));
+    }).join('');
+  }
+  if (t === 'system') {
+    const usage = (e.session && e.session.usage)
+      ? ` · in=${e.session.usage.input_tokens||0} out=${e.session.usage.output_tokens||0}` : '';
+    return jhTurn(`⚙ system · ${e.subtype || ''}${usage}`, 'status', jhTruncate(JSON.stringify(e), 500));
+  }
+  if (t === 'result') {
+    const u = e.usage || {};
+    return jhTurn(`✅ result · ${e.subtype || ''} · in=${u.input_tokens||0} out=${u.output_tokens||0}`, 'status', '');
+  }
+  if (t === 'hook' || t === 'channel' || t === 'attachment') {
+    return jhTurn(`${t}`, 'other', jhTruncate(JSON.stringify(e), 600));
+  }
+  return jhTurn(t || '(unknown)', 'other', jhTruncate(JSON.stringify(e), 600));
+}
 function renderJsonlEntries(entries, prepend) {
   const body = document.getElementById('jh-body');
-  const html = entries.map(e => {
-    const t = (e && e.type) || '(unknown)';
-    const summary = e && e.message ? (
-      Array.isArray(e.message.content) ? e.message.content.map(c => c.type).join('+')
-        : (typeof e.message.content === 'string' ? e.message.content.slice(0, 80) : '')
-    ) : '';
-    const body = JSON.stringify(e).slice(0, 220);
-    return `<div class="ec-jsonl-entry"><b>${esc(t)}</b> ${esc(summary)}<span class="ec-jsonl-entry-raw">${esc(body)}</span></div>`;
-  }).join('');
+  const html = entries.map(jhRenderEntry).join('');
   if (prepend) body.insertAdjacentHTML('afterbegin', html);
   else body.innerHTML = html;
 }
@@ -1679,6 +1731,61 @@ $('se-save')?.addEventListener('click', async () => {
   } catch (e) {
     $('se-message').style.color = 'var(--danger)';
     $('se-message').textContent = '오류: ' + e.message;
+  }
+});
+
+// ── 글로벌 Escape — 가장 위에 열린 모달 닫기 ────────────────────────────────
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const candidates = ['.ec-dialog', '.ec-settings', '#ec-jsonl-modal']
+    .map(sel => [...document.querySelectorAll(sel)])
+    .flat();
+  // DOM 뒤쪽이 보통 위 — 마지막 가시 모달 닫음
+  const top = candidates.filter(el => !el.classList.contains('ec-hidden')).pop();
+  if (top) { e.preventDefault(); top.classList.add('ec-hidden'); }
+});
+
+// ── ec config (config.json) 편집 ─────────────────────────────────────────────
+async function openEcConfigEdit() {
+  $('ece-content').value = '로드 중…';
+  $('ece-message').textContent = '';
+  $('ece-message').style.color = 'var(--danger)';
+  $('ec-econfig-edit').classList.remove('ec-hidden');
+  try {
+    const r = await fetch(apiBase() + 'api/ec-config');
+    const data = await r.json();
+    if (!r.ok || data.error) { $('ece-message').textContent = data.error || ('HTTP ' + r.status); return; }
+    $('ece-path-label').textContent = data.path || '';
+    $('ece-content').value = data.content;
+  } catch (e) {
+    $('ece-message').textContent = '로드 실패: ' + e.message;
+  }
+}
+$('cfg-ec-edit-btn')?.addEventListener('click', openEcConfigEdit);
+$('ece-close')?.addEventListener('click', () => $('ec-econfig-edit').classList.add('ec-hidden'));
+$('ece-cancel')?.addEventListener('click', () => $('ec-econfig-edit').classList.add('ec-hidden'));
+$('ec-econfig-edit')?.addEventListener('click', e => { if (e.target.id === 'ec-econfig-edit') $('ec-econfig-edit').classList.add('ec-hidden'); });
+$('ece-save')?.addEventListener('click', async () => {
+  const content = $('ece-content').value;
+  $('ece-message').style.color = 'var(--text-2)';
+  $('ece-message').textContent = '저장 중…';
+  try {
+    const r = await fetch(apiBase() + 'api/ec-config', {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ content }),
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) {
+      $('ece-message').style.color = 'var(--danger)';
+      $('ece-message').textContent = data.error || ('HTTP ' + r.status);
+      return;
+    }
+    $('ece-message').style.color = 'var(--green)';
+    $('ece-message').textContent = '저장됨 — ' + (data.hint || '재기동 필요');
+  } catch (e) {
+    $('ece-message').style.color = 'var(--danger)';
+    $('ece-message').textContent = '오류: ' + e.message;
   }
 });
 

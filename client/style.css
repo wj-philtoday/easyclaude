@@ -568,7 +568,7 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
   position: fixed; inset: 0;
   background: color-mix(in srgb, var(--bg) 70%, transparent);
   display: flex; align-items: center; justify-content: center;
-  z-index: 100;
+  z-index: 120;  /* ec-settings(100) 위 — settings에서 로그인 등 모달을 띄울 때 가려지지 않게 */
   padding: 16px;
   backdrop-filter: blur(4px);
 }
@@ -1196,12 +1196,20 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 .ec-jsonl-body {
   flex: 1;
   overflow: auto;
-  padding: 8px 12px;
+  padding: 10px 14px;
   background: var(--surface-2);
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 1.55;
   color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ec-jsonl-body .ec-turn { margin: 0; }
+.ec-jsonl-body .ec-turn-body pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .ec-jsonl-entry {
   padding: 5px 4px;

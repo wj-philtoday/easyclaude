@@ -14,6 +14,22 @@ const { startWatcher: startInboxWatcher, eventToChannelText, detectAgentIdentity
 // ── auth process tracking (login OAuth 플로우 상태) ─────────────────────────
 const authProcs = new Map(); // home → { proc, url, status, output, error, exitCode }
 
+// claude (login / setup-token)는 TTY를 기대 → script(1)로 PTY wrap.
+function shellEscapeArg(s) {
+  if (s === '') return "''";
+  if (/^[A-Za-z0-9_\-\.\/=:@,]+$/.test(s)) return s;
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+function spawnClaudePty(args, env) {
+  const cmd = ['claude', ...args].map(shellEscapeArg).join(' ');
+  return spawn('script', ['-q', '-c', cmd, '/dev/null'], {
+    env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+}
+const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[=>NOP\\\(\)\*\+]|\x1b\[\?[0-9;]+[hl]/g;
+function stripAnsi(s) { return String(s).replace(ANSI_RE, ''); }
+
 // ── HOME overlay (ec가 spawn할 claude의 ~/.claude/* 격리) ───────────────────
 // cfg.overlay.enabled === true 면 활성. 기본 off (마이그레이션 안전).
 // overlay HOME 경로: $XDG_DATA_HOME/easyclaude/overlay/
@@ -662,6 +678,10 @@ const server = http.createServer((req, res) => {
   // ── /api/auth/* ── claude auth 래퍼 (login / logout / status / setup-token) ──
   // login은 OAuth 브라우저 플로우라 spawn 후 URL 캡처 → 클라이언트가 새 탭에서 열고
   // login-status 폴링으로 완료 확인.
+  //
+  // claude 1.x는 setup-token/login 둘 다 isTTY check를 해서 non-TTY면 출력을 생략한다.
+  // 우회: util-linux `script -q -c "claude ..." /dev/null` 로 PTY 안에서 실행.
+  // 출력엔 ANSI escape가 잔뜩 섞여 오므로 URL 추출 전에 strip 후 검색.
   if (req.url.startsWith('/api/auth/login-status')) {
     const u = new URL(req.url, 'http://x');
     const home = u.searchParams.get('home') || process.env.HOME;
@@ -694,29 +714,26 @@ const server = http.createServer((req, res) => {
       if (existing && existing.proc && existing.proc.exitCode === null) {
         try { existing.proc.kill('SIGTERM'); } catch {}
       }
-      const proc = spawn('claude', flags, { env: { ...process.env, HOME: home }, stdio: ['ignore','pipe','pipe'] });
+      const proc = spawnClaudePty(flags, { ...process.env, HOME: home });
       const state = { proc, url: null, status: 'pending', output: '', error: '', exitCode: null };
       authProcs.set(home, state);
       proc.stdout.setEncoding('utf8');
       proc.stderr.setEncoding('utf8');
-      const urlRe = /https?:\/\/[^\s'"]+/;
-      proc.stdout.on('data', d => {
-        state.output += d;
-        const m = state.output.match(urlRe);
-        if (m && !state.url) state.url = m[0];
-      });
-      proc.stderr.on('data', d => {
-        state.error += d;
-        // stderr에도 URL이 나올 수 있음
-        const m = (state.output + state.error).match(urlRe);
-        if (m && !state.url) state.url = m[0];
-      });
+      const urlRe = /https?:\/\/[^\s'"\x1b]+/;
+      const tryCaptureUrl = () => {
+        if (state.url) return;
+        const cleaned = stripAnsi(state.output + state.error);
+        const m = cleaned.match(urlRe);
+        if (m) state.url = m[0];
+      };
+      proc.stdout.on('data', d => { state.output += d; tryCaptureUrl(); });
+      proc.stderr.on('data', d => { state.error  += d; tryCaptureUrl(); });
       proc.on('exit', (code, signal) => {
         state.exitCode = code;
         state.status = signal === 'SIGTERM' ? 'killed' : (code === 0 ? 'success' : 'failed');
       });
-      // URL 캡처 위해 잠시 대기 후 응답 (claude가 OAuth URL 출력하는 데 ~1s)
-      const respondAt = Date.now() + 2500;
+      // URL 캡처 위해 대기 (PTY 안 claude가 splash 후 URL 출력까지 보통 1~3s)
+      const respondAt = Date.now() + 4000;
       const tick = setInterval(() => {
         if (state.url || Date.now() >= respondAt || state.exitCode !== null) {
           clearInterval(tick);
@@ -797,15 +814,25 @@ const server = http.createServer((req, res) => {
       if (existing && existing.proc && existing.proc.exitCode === null) {
         try { existing.proc.kill('SIGTERM'); } catch {}
       }
-      const proc = spawn('claude', ['setup-token'], { env: { ...process.env, HOME: home }, stdio: ['ignore','pipe','pipe'] });
+      const proc = spawnClaudePty(['setup-token'], { ...process.env, HOME: home });
       const state = { proc, url: null, status: 'pending', output: '', error: '', exitCode: null };
       authProcs.set(home, state);
       proc.stdout.setEncoding('utf8'); proc.stderr.setEncoding('utf8');
-      const urlRe = /https?:\/\/[^\s'"]+/;
-      proc.stdout.on('data', d => { state.output += d; const m = state.output.match(urlRe); if (m && !state.url) state.url = m[0]; });
-      proc.stderr.on('data', d => { state.error += d; });
+      const urlRe = /https?:\/\/[^\s'"\x1b]+/;
+      const tryCaptureUrl = () => {
+        if (state.url) return;
+        const cleaned = stripAnsi(state.output + state.error);
+        const m = cleaned.match(urlRe);
+        if (m) state.url = m[0];
+      };
+      proc.stdout.on('data', d => { state.output += d; tryCaptureUrl(); });
+      proc.stderr.on('data', d => { state.error  += d; tryCaptureUrl(); });
       proc.on('exit', (code, signal) => { state.exitCode = code; state.status = signal === 'SIGTERM' ? 'killed' : (code === 0 ? 'success' : 'failed'); });
-      const respondAt = Date.now() + 2500;
+      // setup-token은 splash 후 메뉴 → 1~2회 Enter로 진행해야 URL이 나오는 경우가 있음.
+      // 안전하게 1.2s/2.4s 시점에 \r 두 번 자동 전송.
+      setTimeout(() => { try { if (!state.url && state.exitCode === null) proc.stdin.write('\r'); } catch {} }, 1200);
+      setTimeout(() => { try { if (!state.url && state.exitCode === null) proc.stdin.write('\r'); } catch {} }, 2400);
+      const respondAt = Date.now() + 5000;
       const tick = setInterval(() => {
         if (state.url || Date.now() >= respondAt || state.exitCode !== null) {
           clearInterval(tick);
@@ -886,6 +913,48 @@ const server = http.createServer((req, res) => {
         return res.end(JSON.stringify({ ok: true, path: settingsPath, mode }));
       });
     }
+  }
+
+  // /api/ec-config — ec 자체 설정(cfg.json) GET/PUT
+  // cfg는 module load 시점 const라 PUT 후 재기동 필요. response의 needsRestart=true 안내.
+  if (req.url.startsWith('/api/ec-config')) {
+    const targetPath = cfgPath || path.join(XDG_CONFIG_HOME, 'easyclaude', 'config.json');
+    if (req.method === 'GET') {
+      let content;
+      try {
+        content = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, 'utf8') : '{}';
+      } catch (e) {
+        res.writeHead(500, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: e.message }));
+      }
+      res.writeHead(200, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ ok: true, path: targetPath, content, exists: fs.existsSync(targetPath) }));
+    }
+    if (req.method === 'PUT') {
+      return readJsonBody(req, (err, body) => {
+        if (err) { res.writeHead(400); return res.end(err.message); }
+        const content = body && body.content;
+        if (typeof content !== 'string') {
+          res.writeHead(400, {'Content-Type':'application/json'});
+          return res.end(JSON.stringify({ error: 'content (string) required' }));
+        }
+        try { JSON.parse(content); }
+        catch (e) {
+          res.writeHead(400, {'Content-Type':'application/json'});
+          return res.end(JSON.stringify({ error: 'invalid JSON: ' + e.message }));
+        }
+        try {
+          ensureDir(path.dirname(targetPath));
+          fs.writeFileSync(targetPath, content);
+        } catch (e) {
+          res.writeHead(500, {'Content-Type':'application/json'});
+          return res.end(JSON.stringify({ error: e.message }));
+        }
+        res.writeHead(200, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ ok: true, path: targetPath, needsRestart: true, hint: 'ec 프로세스 재기동 필요 (포트/세션 목록/defaultArgs 등 cfg는 부팅 시 1회 로드)' }));
+      });
+    }
+    res.writeHead(405); return res.end('GET or PUT');
   }
 
   // /api/sessions/<sid>/jsonl?offset=N&limit=M — 페이지 단위 jsonl 라인 + 총 라인 수
@@ -1153,6 +1222,7 @@ function spawnSession(sess) {
   // dormant 상태(proc=null)이면 재spawn.
   let ch = ptyChannels.get(sess.id);
   if (ch && ch.proc && ch.proc.exitCode === null) return ch;  // alive
+  if (ch && ch.spawning) return ch;  // 진행 중 spawn — 중복 진입 차단
 
   const isNewChannel = !ch;
   if (isNewChannel) {
@@ -1171,6 +1241,7 @@ function spawnSession(sess) {
       alive: false,
       inboxStop: null,     // IOA 인박스 watcher stop fn
       signedInAs: null,    // 현재 watcher가 추적 중인 ioa_id
+      spawning: false,     // spawn 진행 플래그 (중복 진입 방어)
     };
     ptyChannels.set(sess.id, ch);
 
@@ -1206,53 +1277,59 @@ function spawnSession(sess) {
     });
   }
 
-  // proc spawn
-  const { args, isNew, claudeId, injectedEnv } = buildSpawnArgs(sess);
-  if (isNew) {
-    sessionState[sess.id] = {
-      ...(sessionState[sess.id] || {}),
-      claudeId,
-      name: sess.name,
-      cwd: sess.cwd,
-      createdAt: sessionState[sess.id]?.createdAt || new Date().toISOString(),
-    };
-    saveState(sessionState);
-  }
-  ch.claudeId = claudeId;
-  console.log(`[easyclaude] spawn ${sess.id} (${claudeId}) → claude ${args.join(' ')}`);
-
-  const childEnv = {
-    ...process.env,
-    ...defaultClaudeEnv(),
-    ...(injectedEnv || {}),
-  };
-  // sess.home 명시 override가 최우선. 없으면 cfg.overlay.enabled에 따라 overlay HOME.
-  if (sess.home) {
-    childEnv.HOME = sess.home;
-  } else if (cfg && cfg.overlay && cfg.overlay.enabled === true) {
-    try {
-      const ovHome = ensureOverlayHome(process.env.HOME);
-      childEnv.HOME = ovHome;
-      console.log(`[easyclaude] overlay HOME for ${sess.id}: ${ovHome}`);
-    } catch (e) {
-      console.error(`[easyclaude] overlay setup fail: ${e.message}`);
+  // proc spawn — spawning 플래그로 동시 진입 차단
+  ch.spawning = true;
+  let proc;
+  try {
+    const { args, isNew, claudeId, injectedEnv } = buildSpawnArgs(sess);
+    if (isNew) {
+      sessionState[sess.id] = {
+        ...(sessionState[sess.id] || {}),
+        claudeId,
+        name: sess.name,
+        cwd: sess.cwd,
+        createdAt: sessionState[sess.id]?.createdAt || new Date().toISOString(),
+      };
+      saveState(sessionState);
     }
+    ch.claudeId = claudeId;
+    console.log(`[easyclaude] spawn ${sess.id} (${claudeId}) → claude ${args.join(' ')}`);
+
+    const childEnv = {
+      ...process.env,
+      ...defaultClaudeEnv(),
+      ...(injectedEnv || {}),
+    };
+    // sess.home 명시 override가 최우선. 없으면 cfg.overlay.enabled에 따라 overlay HOME.
+    if (sess.home) {
+      childEnv.HOME = sess.home;
+    } else if (cfg && cfg.overlay && cfg.overlay.enabled === true) {
+      try {
+        const ovHome = ensureOverlayHome(process.env.HOME);
+        childEnv.HOME = ovHome;
+        console.log(`[easyclaude] overlay HOME for ${sess.id}: ${ovHome}`);
+      } catch (e) {
+        console.error(`[easyclaude] overlay setup fail: ${e.message}`);
+      }
+    }
+
+    proc = spawn('claude', args, {
+      cwd: sess.cwd,
+      env: childEnv,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    proc.stdout.setEncoding('utf8');
+    proc.stderr.setEncoding('utf8');
+    proc.stdin.on('error', err => {
+      console.error(`[easyclaude:${sess.id}:stdin] ${err.code || err.message}`);
+    });
+
+    ch.proc = proc;
+    ch.alive = true;
+    ch.lineBuf = '';
+  } finally {
+    ch.spawning = false;
   }
-
-  const proc = spawn('claude', args, {
-    cwd: sess.cwd,
-    env: childEnv,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  proc.stdout.setEncoding('utf8');
-  proc.stderr.setEncoding('utf8');
-  proc.stdin.on('error', err => {
-    console.error(`[easyclaude:${sess.id}:stdin] ${err.code || err.message}`);
-  });
-
-  ch.proc = proc;
-  ch.alive = true;
-  ch.lineBuf = '';
 
   proc.stdout.on('data', data => {
     ch.lineBuf += data;
@@ -1314,25 +1391,40 @@ function maybeStartInboxFromLine(ch, line) {
 }
 
 // ── 입력 헬퍼 ────────────────────────────────────────────────────────────────
+function notifyInputFailed(ch, kind, reason, message) {
+  if (!ch || typeof ch.broadcast !== 'function') return;
+  ch.broadcast({ op: 'input_failed', kind, reason, message: message || null });
+}
+
 function sendUserText(ch, text) {
   if (!ch.proc || ch.proc.exitCode !== null) {
     // dormant 채널 — 자동 재spawn (대화 이력 보존)
     spawnSession(ch.sess);
   }
-  if (!ch.proc) return false;
+  if (!ch.proc) {
+    notifyInputFailed(ch, 'user_text', 'no_process');
+    return false;
+  }
   const line = JSON.stringify({
     type: 'user',
     message: { role: 'user', content: [{ type: 'text', text }] },
   }) + '\n';
   try { ch.proc.stdin.write(line); return true; }
-  catch (e) { console.error(`[easyclaude] stdin write fail: ${e.message}`); return false; }
+  catch (e) {
+    console.error(`[easyclaude] stdin write fail: ${e.message}`);
+    notifyInputFailed(ch, 'user_text', 'write_error', e.message);
+    return false;
+  }
 }
 
 function sendToolResult(ch, tool_use_id, content, isError) {
   if (!ch.proc || ch.proc.exitCode !== null) {
     spawnSession(ch.sess);
   }
-  if (!ch.proc) return false;
+  if (!ch.proc) {
+    notifyInputFailed(ch, 'tool_result', 'no_process');
+    return false;
+  }
   const contentArr = typeof content === 'string'
     ? [{ type: 'text', text: content }]
     : (Array.isArray(content) ? content : [{ type: 'text', text: JSON.stringify(content) }]);
@@ -1349,7 +1441,11 @@ function sendToolResult(ch, tool_use_id, content, isError) {
     },
   }) + '\n';
   try { ch.proc.stdin.write(line); return true; }
-  catch (e) { console.error(`[easyclaude] tool_result write fail: ${e.message}`); return false; }
+  catch (e) {
+    console.error(`[easyclaude] tool_result write fail: ${e.message}`);
+    notifyInputFailed(ch, 'tool_result', 'write_error', e.message);
+    return false;
+  }
 }
 
 // ── WebSocket ────────────────────────────────────────────────────────────────

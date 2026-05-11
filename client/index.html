@@ -14,7 +14,7 @@
     <div class="ec-nav-header">
       <span id="ec-logo" class="ec-logo-mark" aria-hidden="true"></span>
       <span id="ec-title" class="ec-title">easyclaude</span>
-      <button id="ec-ham" class="ec-icon-btn">☰</button>
+      <button id="ec-ham" class="ec-icon-btn" aria-label="사이드바 토글">☰</button>
     </div>
     <div id="ec-tabs" class="ec-tabs"></div>
     <div class="ec-nav-footer">
@@ -27,8 +27,8 @@
   <main id="ec-main" class="ec-main">
     <div id="ec-viewbar" class="ec-viewbar">
       <span id="ec-active-label" class="ec-active-label"></span>
-      <button id="ec-perm-pill" class="ec-perm-pill" title="권한 모드">🔒</button>
-      <button id="ec-info-btn" class="ec-icon-btn" title="세션 정보">ⓘ</button>
+      <button id="ec-perm-pill" class="ec-perm-pill" title="권한 모드" aria-label="권한 모드">🔒</button>
+      <button id="ec-info-btn" class="ec-icon-btn" title="세션 정보" aria-label="세션 정보">ⓘ</button>
       <span id="ec-status" class="ec-parse-status">connecting…</span>
     </div>
     <div id="ec-parsed-view" class="ec-parsed-view"></div>
@@ -61,7 +61,7 @@
   <div class="ec-dialog-panel">
     <div class="ec-dialog-head">
       <h3>세션 정보 — <span id="info-session-label"></span></h3>
-      <button id="info-close" class="ec-icon-btn">✕</button>
+      <button id="info-close" class="ec-icon-btn" aria-label="닫기">✕</button>
     </div>
     <div class="ec-dialog-body" id="info-body">
       <!-- 동적 렌더 -->
@@ -78,7 +78,7 @@
   <div class="ec-dialog-panel">
     <div class="ec-dialog-head">
       <h3>settings.json — <span id="se-home-label"></span></h3>
-      <button id="se-close" class="ec-icon-btn">✕</button>
+      <button id="se-close" class="ec-icon-btn" aria-label="닫기">✕</button>
     </div>
     <div class="ec-dialog-body">
       <label class="ec-field">
@@ -103,7 +103,7 @@
   <div class="ec-dialog-panel">
     <div class="ec-dialog-head">
       <h3>Claude 로그인 — <span id="lg-home-label"></span></h3>
-      <button id="lg-close" class="ec-icon-btn">✕</button>
+      <button id="lg-close" class="ec-icon-btn" aria-label="닫기">✕</button>
     </div>
     <div class="ec-dialog-body">
       <label class="ec-field">
@@ -141,7 +141,7 @@
   <div class="ec-dialog-panel">
     <div class="ec-dialog-head">
       <h3 id="ec-dialog-title">질문</h3>
-      <button id="ec-dialog-close" class="ec-icon-btn">✕</button>
+      <button id="ec-dialog-close" class="ec-icon-btn" aria-label="닫기">✕</button>
     </div>
     <div id="ec-dialog-body" class="ec-dialog-body"></div>
     <div class="ec-dialog-actions">
@@ -156,7 +156,7 @@
   <div class="ec-dialog-panel">
     <div class="ec-dialog-head">
       <h3>새 세션</h3>
-      <button id="ec-newsession-close" class="ec-icon-btn">✕</button>
+      <button id="ec-newsession-close" class="ec-icon-btn" aria-label="닫기">✕</button>
     </div>
     <div class="ec-ns-tabs">
       <button class="ec-ns-tab active" data-tab="new">새 세션</button>
@@ -244,7 +244,7 @@
   <div class="ec-settings-panel">
     <div class="ec-settings-head">
       <h3>설정</h3>
-      <button id="ec-settings-close" class="ec-icon-btn">✕</button>
+      <button id="ec-settings-close" class="ec-icon-btn" aria-label="닫기">✕</button>
     </div>
     <div class="ec-settings-body">
 
@@ -359,6 +359,12 @@
       </section>
 
       <section class="ec-settings-section">
+        <h4>ec 자체 설정 (config.json)</h4>
+        <small class="ec-field-hint">port·host·defaultArgs·sessions·overlay·formatting 등 ec 부팅 cfg. 저장 후 ec 재기동 필요.</small>
+        <div style="margin-top:8px"><button id="cfg-ec-edit-btn" class="ec-btn">config.json 편집…</button></div>
+      </section>
+
+      <section class="ec-settings-section">
         <div class="ec-settings-actions">
           <button id="cfg-reset" class="ec-btn">기본값으로</button>
         </div>
@@ -368,6 +374,28 @@
   </div>
 </div>
 
-<script src="app.js?v=20260511i"></script>
+<!-- ec config (config.json) 편집 모달 -->
+<div id="ec-econfig-edit" class="ec-dialog ec-hidden">
+  <div class="ec-dialog-panel">
+    <div class="ec-dialog-head">
+      <h3>ec config.json — <span id="ece-path-label"></span></h3>
+      <button id="ece-close" class="ec-icon-btn" aria-label="닫기">✕</button>
+    </div>
+    <div class="ec-dialog-body">
+      <label class="ec-field">
+        <span>JSON 내용 (저장 시 유효성 검사)</span>
+        <textarea id="ece-content" rows="22" spellcheck="false"></textarea>
+      </label>
+      <small class="ec-field-hint">저장 후 ec 프로세스 재기동 필요 (port/host/sessions/defaultArgs 등은 부팅 1회 로드).</small>
+      <div id="ece-message" class="ec-field-hint" style="color: var(--danger)"></div>
+    </div>
+    <div class="ec-dialog-actions">
+      <button id="ece-cancel" class="ec-btn">취소</button>
+      <button id="ece-save" class="ec-btn ec-btn-primary">저장</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js?v=20260512a"></script>
 </body>
 </html>
