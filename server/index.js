@@ -1544,15 +1544,7 @@ wss.on('connection', ws => {
       return;
     }
 
-    if (op === 'interrupt') {
-      // Ctrl+C 같은 인터럽트
-      const att = wsChannels.get(id);
-      if (!att) return;
-      const ch = ptyChannels.get(att.sessionId);
-      if (!ch) return;
-      try { ch.proc.kill('SIGINT'); } catch {}
-      return;
-    }
+    // 'interrupt' 중복 핸들러 제거 — 위 control_request 버전이 정상 (SIGINT은 stream-json proc에 잘못 작용)
 
     if (op === 'restart') {
       // 세션 재기동 — claudeId 보존, claude proc만 재spawn. args override 가능.

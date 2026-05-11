@@ -39,6 +39,7 @@
         <button id="ec-interrupt-btn" class="ec-action-btn" title="중단 (SIGINT)">⏹ 중단</button>
         <button id="ec-restart-btn" class="ec-action-btn" title="세션 재기동">↻ 재기동</button>
         <span id="ec-usage" class="ec-usage"></span>
+        <button id="ec-history-btn" class="ec-icon-btn" title="jsonl 히스토리" style="margin-left:6px;font-size:11px;padding:2px 8px">📜</button>
       </div>
       <div id="ec-inputbar" class="ec-inputbar">
         <div id="ec-autocomplete" class="ec-autocomplete ec-hidden"></div>
@@ -122,8 +123,9 @@
         <span>이메일 (선택, claude.ai/SSO 미리 채움)</span>
         <input id="lg-email" type="email" placeholder="you@example.com">
       </label>
-      <div id="lg-step1">
-        <button id="lg-start" class="ec-btn ec-btn-primary" style="width:100%">로그인 시작</button>
+      <div id="lg-step1" style="display:flex;gap:8px;flex-direction:column">
+        <button id="lg-start" class="ec-btn ec-btn-primary">로그인 시작 (OAuth)</button>
+        <button id="lg-setup-token" class="ec-btn">장기 토큰 발급 (subscription 필요)</button>
       </div>
       <div id="lg-step2" class="ec-hidden">
         <p>아래 URL을 새 탭에서 열고 OAuth 완료하세요:</p>

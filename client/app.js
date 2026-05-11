@@ -605,6 +605,102 @@ const COLORS = {
   thinking:'#74c7ec', other:'var(--muted)',
 };
 
+// ── jsonl 페이지네이션 (총 라인 + 더 불러오기) ────────────────────────────────
+async function fetchJsonlInfo(sid) {
+  try {
+    const r = await fetch(apiBase() + 'api/sessions/' + encodeURIComponent(sid) + '/jsonl?offset=0&limit=1&parse=0');
+    return await r.json();
+  } catch { return null; }
+}
+async function loadOlderJsonl(sid, fromOffset, count) {
+  // fromOffset에서 count만큼 위 (offset 작은 쪽) 가져옴
+  const start = Math.max(0, fromOffset - count);
+  const lim = fromOffset - start;
+  if (lim <= 0) return null;
+  try {
+    const r = await fetch(apiBase() + `api/sessions/${encodeURIComponent(sid)}/jsonl?offset=${start}&limit=${lim}`);
+    return await r.json();
+  } catch { return null; }
+}
+async function showJsonlHistory(sid) {
+  // 전체 jsonl history를 모달로 보여줌. 위로 스크롤 시 추가 로드.
+  let el = document.getElementById('ec-jsonl-modal');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'ec-jsonl-modal';
+    el.className = 'ec-dialog ec-hidden';
+    el.innerHTML = `
+      <div class="ec-dialog-panel" style="max-width:900px;width:95vw;max-height:90vh;display:flex;flex-direction:column">
+        <div class="ec-dialog-head">
+          <h3 style="margin:0">jsonl 히스토리 — <span id="jh-info"></span></h3>
+          <button id="jh-close" class="ec-icon-btn">✕</button>
+        </div>
+        <div id="jh-loader" style="text-align:center;padding:8px;color:var(--text-2);font-size:12px"></div>
+        <div id="jh-body" style="overflow:auto;flex:1;padding:12px;background:var(--bg-deep,#f5f1ec);font-size:11px;font-family:ui-monospace,monospace"></div>
+      </div>`;
+    document.body.appendChild(el);
+    el.querySelector('#jh-close').addEventListener('click', () => el.classList.add('ec-hidden'));
+    el.addEventListener('click', e => { if (e.target === el) el.classList.add('ec-hidden'); });
+  }
+  el.dataset.sid = sid;
+  el.dataset.loaded = '0';
+  el.dataset.total = '0';
+  document.getElementById('jh-body').innerHTML = '';
+  document.getElementById('jh-info').textContent = '로드 중…';
+  document.getElementById('jh-loader').textContent = '';
+  el.classList.remove('ec-hidden');
+  // 첫 페이지: 마지막 500 라인 (가장 최근)
+  const info = await fetchJsonlInfo(sid);
+  const total = info?.total || 0;
+  el.dataset.total = String(total);
+  document.getElementById('jh-info').textContent = `총 ${total} 라인 — 최근부터 표시 (위 스크롤로 더 불러오기)`;
+  const initialLimit = Math.min(500, total);
+  const initialOffset = Math.max(0, total - initialLimit);
+  const first = await loadOlderJsonl(sid, total, initialLimit);
+  if (first && first.entries) {
+    el.dataset.loaded = String(first.entries.length);
+    el.dataset.offset = String(initialOffset);
+    renderJsonlEntries(first.entries, false);
+  }
+  // 위 스크롤 시 추가 로드
+  const body = document.getElementById('jh-body');
+  body.onscroll = async () => {
+    if (body.scrollTop < 80) {
+      const loaded = parseInt(el.dataset.loaded, 10);
+      const currentOffset = parseInt(el.dataset.offset, 10);
+      if (currentOffset <= 0) {
+        document.getElementById('jh-loader').textContent = '— 최상단 도달 —';
+        return;
+      }
+      document.getElementById('jh-loader').textContent = '로드 중…';
+      const older = await loadOlderJsonl(sid, currentOffset, 500);
+      if (older && older.entries && older.entries.length) {
+        el.dataset.loaded = String(loaded + older.entries.length);
+        el.dataset.offset = String(Math.max(0, currentOffset - older.entries.length));
+        const oldHeight = body.scrollHeight;
+        renderJsonlEntries(older.entries, true); // prepend
+        // 스크롤 위치 유지
+        body.scrollTop = body.scrollHeight - oldHeight;
+      }
+      document.getElementById('jh-loader').textContent = '';
+    }
+  };
+}
+function renderJsonlEntries(entries, prepend) {
+  const body = document.getElementById('jh-body');
+  const html = entries.map(e => {
+    const t = (e && e.type) || '(unknown)';
+    const summary = e && e.message ? (
+      Array.isArray(e.message.content) ? e.message.content.map(c => c.type).join('+')
+        : (typeof e.message.content === 'string' ? e.message.content.slice(0, 80) : '')
+    ) : '';
+    const body = JSON.stringify(e).slice(0, 220);
+    return `<div style="padding:4px 0;border-bottom:1px solid var(--border,#eee)"><b>${esc(t)}</b> ${esc(summary)}<br><span style="color:var(--muted)">${esc(body)}</span></div>`;
+  }).join('');
+  if (prepend) body.insertAdjacentHTML('afterbegin', html);
+  else body.innerHTML = html;
+}
+
 function renderActive() {
   if (!activeSid) {
     $parsed.innerHTML = `
@@ -713,6 +809,11 @@ $interrupt?.addEventListener('click', () => {
   const ch = activeChannel();
   if (!ch) return;
   sendWs({ op: 'interrupt', id: ch.id });
+});
+$('ec-history-btn')?.addEventListener('click', () => {
+  const ch = activeChannel();
+  if (!ch) return;
+  showJsonlHistory(ch.sessionId);
 });
 // Escape 키: 입력칸이 비어있을 때만 인터럽트로 (포커스 있는 곳 텍스트 입력 중이면 무시)
 window.addEventListener('keydown', (e) => {
@@ -1316,6 +1417,43 @@ $('lg-start')?.addEventListener('click', async () => {
     $('lg-message').textContent = '오류: ' + e.message;
   }
 });
+$('lg-setup-token')?.addEventListener('click', async () => {
+  const home = $('ec-login').dataset.home;
+  $('lg-message').textContent = '';
+  try {
+    const r = await fetch(apiBase() + 'api/auth/setup-token', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ home }),
+    });
+    const data = await r.json();
+    if (!data.ok) { $('lg-message').textContent = data.error || '시작 실패'; return; }
+    $('lg-step1').classList.add('ec-hidden');
+    $('lg-step2').classList.remove('ec-hidden');
+    if (data.url) $('lg-url').value = data.url;
+    if (lgPollTimer) clearInterval(lgPollTimer);
+    lgPollTimer = setInterval(async () => {
+      try {
+        const r2 = await fetch(apiBase() + 'api/auth/login-status?home=' + encodeURIComponent(home));
+        const s = await r2.json();
+        if (s.url && !$('lg-url').value) $('lg-url').value = s.url;
+        $('lg-status').textContent = `상태: ${s.status}`;
+        if (s.status === 'success' || s.status === 'failed' || s.status === 'killed') {
+          clearInterval(lgPollTimer); lgPollTimer = null;
+          if (s.status === 'success') {
+            $('lg-status').textContent = '✅ 토큰 발급 완료';
+            setTimeout(() => { $('ec-login').classList.add('ec-hidden'); renderHomesList(); }, 1200);
+          } else {
+            $('lg-message').textContent = `실패: ${s.error || s.output || s.status}`;
+          }
+        }
+      } catch {}
+    }, 1500);
+  } catch (e) {
+    $('lg-message').textContent = '오류: ' + e.message;
+  }
+});
+
 $('lg-open')?.addEventListener('click', () => {
   const url = $('lg-url').value;
   if (url) window.open(url, '_blank', 'noopener');
