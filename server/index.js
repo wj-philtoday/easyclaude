@@ -117,6 +117,20 @@ function ensureOverlayHome(realHome) {
     }
   }
 
+  // 4) projects — real HOME의 .claude/projects/ 를 그대로 공유 (대화 jsonl 계승).
+  //    ec HOME은 스킬/플러그인/credentials 격리용이고, 대화 기록은 cwd 기반 projects를 공유.
+  const ovProjects = path.join(ovClaude, 'projects');
+  const realProjects = path.join(realHome, '.claude', 'projects');
+  try {
+    fs.lstatSync(ovProjects);
+    // 이미 존재 — symlink든 dir이든 건드리지 않음
+  } catch {
+    if (fs.existsSync(realProjects)) {
+      try { fs.symlinkSync(realProjects, ovProjects, 'dir'); }
+      catch (e) { console.error(`[easyclaude] projects symlink fail: ${e.message}`); }
+    }
+  }
+
   return ovDir;
 }
 
