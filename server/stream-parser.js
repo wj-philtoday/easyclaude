@@ -2,11 +2,59 @@
 // Claude Code stream-json 출력 파서.
 // 라인별 JSON 이벤트(system/user/assistant/result/stream_event/hook_event)를
 // 클라이언트가 렌더할 수 있는 통일된 turn 형태로 변환한다.
+//
+// turn types:
+//   human       — 사용자가 직접 입력한 텍스트
+//   channel     — <channel source="..."> 봉투 (IOA 등 외부 push)
+//   tool_out    — tool_result 응답
+//   assistant   — claude 텍스트 응답
+//   thinking    — claude 내부 사유
+//   tool_call   — claude의 tool_use (category 필드 부착)
+//   result      — turn 종료 마커 (duration/cost/result_text)
+//   hook        — hook lifecycle 이벤트
+//   other       — 알 수 없는 타입 (raw 보존)
+
+// ── 채널 봉투 파싱 ─────────────────────────────────────────────────────────
+function parseChannelEnvelope(text) {
+  if (!text || typeof text !== 'string') return null;
+  if (text.indexOf('<channel ') === -1) return null;
+  const m = text.match(/<channel\s+([^>]+)>([\s\S]*?)<\/channel>/);
+  if (!m) return null;
+  const attrs = {};
+  const re = /([a-zA-Z_][\w-]*)="([^"]*)"/g;
+  let am;
+  while ((am = re.exec(m[1])) !== null) attrs[am[1]] = am[2];
+  return {
+    source: attrs.source || 'unknown',
+    ioa_id: attrs.ioa_id || null,
+    from: attrs.from || null,
+    channelType: attrs.type || null,
+    body: m[2].trim(),
+    raw: text,
+  };
+}
+
+// ── tool 분류 ──────────────────────────────────────────────────────────────
+function toolCategory(name) {
+  if (!name) return 'unknown';
+  if (name.startsWith('mcp__ioa__')) return 'mcp_ioa';
+  if (name.startsWith('mcp__claude_ai_')) return 'mcp_claude_ai';
+  if (name.startsWith('mcp__claude-in-chrome__')) return 'mcp_browser';
+  if (name.startsWith('mcp__')) return 'mcp_other';
+  if (name === 'Agent' || name === 'Task') return 'agent';
+  if (name === 'Skill') return 'skill';
+  if (name === 'AskUserQuestion') return 'dialog';
+  if (name === 'TodoWrite' || name.startsWith('Task') || name.startsWith('Cron') || name === 'ScheduleWakeup') return 'task';
+  if (name === 'WebFetch' || name === 'WebSearch') return 'web';
+  if (['Read','Write','Edit','Glob','Grep','NotebookEdit'].includes(name)) return 'fs';
+  if (name === 'Bash' || name === 'Monitor') return 'shell';
+  return 'builtin';
+}
 
 class StreamParser {
   constructor(handlers = {}) {
     this.h = handlers;
-    this.turns = [];                          // 누적 turn (full history)
+    this.turns = [];
     this.session = {
       id: null,
       model: null,
@@ -16,7 +64,7 @@ class StreamParser {
       contextWindow: null,
     };
     this.lastResult = null;
-    this.pendingAssistant = null;            // stream_event 누적
+    this.pendingAssistant = null;
   }
 
   feedLine(line) {
@@ -24,28 +72,23 @@ class StreamParser {
     if (!line) return;
     let evt;
     try { evt = JSON.parse(line); }
-    catch (e) {
-      this._emitRaw(line);
-      return;
-    }
+    catch (e) { this._emitRaw(line); return; }
     this._handle(evt);
   }
 
   _emitRaw(line) {
-    // JSON이 아닌 stderr/로그 라인 — debug용 raw turn으로
     this._addTurn({ type: 'other', body: line, raw: true });
   }
 
   _handle(evt) {
     switch (evt.type) {
-      case 'system':                  return this._onSystem(evt);
-      case 'user':                    return this._onUser(evt);
-      case 'assistant':               return this._onAssistant(evt);
-      case 'stream_event':            return this._onStreamEvent(evt);
-      case 'result':                  return this._onResult(evt);
-      case 'hook_event':              return this._onHook(evt);
+      case 'system':           return this._onSystem(evt);
+      case 'user':             return this._onUser(evt);
+      case 'assistant':        return this._onAssistant(evt);
+      case 'stream_event':     return this._onStreamEvent(evt);
+      case 'result':           return this._onResult(evt);
+      case 'hook_event':       return this._onHook(evt);
       case 'rate_limit_event':
-        // rate limit info — turn 미생성, 메타로만 (필요시 onHook 통로 사용)
         this.session.rateLimit = evt.rate_limit_info;
         this.h.onRateLimit && this.h.onRateLimit(evt.rate_limit_info);
         return;
@@ -67,6 +110,11 @@ class StreamParser {
       this.session.claudeCodeVersion = evt.claude_code_version || null;
       this.session.permissionMode = evt.permissionMode || null;
       this.h.onSystem && this.h.onSystem(this.session);
+      return;
+    }
+    if (evt.subtype === 'status') {
+      // 단순 'requesting' 등 heartbeat — turn 미생성, callback만
+      this.h.onStatus && this.h.onStatus(evt.status, evt);
     }
   }
 
@@ -76,9 +124,26 @@ class StreamParser {
     const contents = Array.isArray(msg.content)
       ? msg.content
       : [{ type: 'text', text: String(msg.content || '') }];
+    const ts = evt.timestamp || null;
+    const uuid = evt.uuid || null;
     for (const c of contents) {
       if (c.type === 'text') {
-        this._addTurn({ type: 'human', body: c.text || '' });
+        const text = c.text || '';
+        const channel = parseChannelEnvelope(text);
+        if (channel) {
+          this._addTurn({
+            type: 'channel',
+            source: channel.source,
+            ioa_id: channel.ioa_id,
+            from: channel.from,
+            channelType: channel.channelType,
+            body: channel.body,
+            raw: channel.raw,
+            ts, uuid,
+          });
+        } else {
+          this._addTurn({ type: 'human', body: text, ts, uuid });
+        }
       } else if (c.type === 'tool_result') {
         const body = this._stringifyContent(c.content);
         this._addTurn({
@@ -86,6 +151,7 @@ class StreamParser {
           body,
           tool_use_id: c.tool_use_id,
           is_error: !!c.is_error,
+          ts, uuid,
         });
       }
     }
@@ -95,9 +161,11 @@ class StreamParser {
     const msg = evt.message;
     if (!msg) return;
     const contents = Array.isArray(msg.content) ? msg.content : [];
+    const ts = evt.timestamp || null;
+    const uuid = evt.uuid || null;
     for (const c of contents) {
       if (c.type === 'text') {
-        this._addTurn({ type: 'assistant', body: c.text || '' });
+        this._addTurn({ type: 'assistant', body: c.text || '', ts, uuid });
       } else if (c.type === 'tool_use') {
         const inputStr = typeof c.input === 'string'
           ? c.input
@@ -108,8 +176,9 @@ class StreamParser {
           tool_name: c.name,
           tool_use_id: c.id,
           input: c.input,
+          category: toolCategory(c.name),
+          ts, uuid,
         });
-        // 인터랙티브 툴 — Phase 2 다이얼로그 트리거
         if (c.name === 'AskUserQuestion') {
           this.h.onAskUserQuestion && this.h.onAskUserQuestion({
             tool_use_id: c.id,
@@ -117,15 +186,13 @@ class StreamParser {
           });
         }
       } else if (c.type === 'thinking') {
-        this._addTurn({ type: 'thinking', body: c.thinking || c.text || '' });
+        this._addTurn({ type: 'thinking', body: c.thinking || c.text || '', ts, uuid });
       }
     }
     if (msg.usage) this._updateUsage(msg.usage);
   }
 
   _onStreamEvent(evt) {
-    // partial message — turn 생성 안 함. 최종 'assistant' 이벤트로 완성된 텍스트만 turn화.
-    // typing indicator가 필요하면 별도 onPartial 콜백으로 broadcast (turn에 미반영).
     const sub = evt.event;
     if (!sub) return;
     if (sub.type === 'content_block_delta' && sub.delta && sub.delta.type === 'text_delta') {
@@ -144,13 +211,31 @@ class StreamParser {
       num_turns: evt.num_turns,
       total_cost_usd: evt.total_cost_usd,
       session_id: evt.session_id,
+      is_error: !!evt.is_error,
+      stop_reason: evt.stop_reason || null,
+      result_text: evt.result || '',
     };
+    this._addTurn({
+      type: 'result',
+      subtype: evt.subtype,
+      result_text: evt.result || '',
+      duration_ms: evt.duration_ms,
+      num_turns: evt.num_turns,
+      cost_usd: evt.total_cost_usd,
+      is_error: !!evt.is_error,
+      stop_reason: evt.stop_reason || null,
+      uuid: evt.uuid || null,
+    });
     this.h.onResult && this.h.onResult(this.lastResult, this.session.usage);
   }
 
   _onHook(evt) {
-    // hook lifecycle event — 일단 미처리, 필요시 turn으로 흘려보냄
-    // 예: pre_tool_use / post_tool_use / user_prompt_submit / session_start ...
+    const hookName = evt.hook_event_name || evt.name || evt.event || null;
+    this._addTurn({
+      type: 'hook',
+      hook_event: hookName,
+      raw: evt,
+    });
     this.h.onHook && this.h.onHook(evt);
   }
 
@@ -194,4 +279,4 @@ class StreamParser {
   }
 }
 
-module.exports = { StreamParser };
+module.exports = { StreamParser, parseChannelEnvelope, toolCategory };
