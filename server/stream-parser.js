@@ -77,7 +77,8 @@ class StreamParser {
   }
 
   _emitRaw(line) {
-    this._addTurn({ type: 'other', body: line, raw: true });
+    // JSON 파스 실패 — 진짜 비정형 stdout (보통은 안 일어남). 디버그용으로 'meta' 분류.
+    this._addTurn({ type: 'meta', body: line, raw: true, eventType: 'raw_line' });
   }
 
   _handle(evt) {
@@ -92,8 +93,27 @@ class StreamParser {
         this.session.rateLimit = evt.rate_limit_info;
         this.h.onRateLimit && this.h.onRateLimit(evt.rate_limit_info);
         return;
+      // 세션 메타 이벤트들은 session에 흡수, turn 미생성
+      case 'custom-title':
+        this.session.customTitle = evt.customTitle || this.session.customTitle;
+        this.h.onSystem && this.h.onSystem(this.session);
+        return;
+      case 'agent-name':
+        this.session.agentName = evt.agentName || this.session.agentName;
+        this.h.onSystem && this.h.onSystem(this.session);
+        return;
+      case 'permission-mode':
+        this.session.permissionMode = evt.permissionMode || this.session.permissionMode;
+        this.h.onSystem && this.h.onSystem(this.session);
+        return;
+      case 'compact_boundary':
+      case 'session_id_change':
+      case 'usage_alert':
+        // 세션 lifecycle 이벤트 — 흡수
+        return;
       default:
-        this._addTurn({ type: 'other', body: JSON.stringify(evt), raw: true });
+        // 알려지지 않은 type — 'meta' 로 분류 (대화창 기본 숨김, 디버그 토글로 노출)
+        this._addTurn({ type: 'meta', body: JSON.stringify(evt), raw: true, eventType: evt.type });
     }
   }
 

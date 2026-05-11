@@ -320,6 +320,7 @@ function onMsg(msg) {
     if (!ch) return;
     ch.turns = msg.turns || [];
     ch.usage = msg.usage || ch.usage;
+    if (ch.stalled && ch.turns.length) ch.stalled = null;  // 응답 재개 시 stalled 해제
     // pendingInputs 중 서버 turns에 매칭되는 항목 제거 (echo 도착)
     if (ch.pendingInputs?.length) {
       ch.pendingInputs = ch.pendingInputs.filter(p =>
@@ -354,8 +355,31 @@ function onMsg(msg) {
     return;
   }
   if (op === 'closed') {
-    if (ch) { ch.alive = false; }
+    if (ch) {
+      ch.alive = false;
+      const err = ((msg.stderr || '') + ' ' + (msg.error || '')).toLowerCase();
+      if (/not logged in|authentication|credentials|please log in|invalid api key|auth/.test(err)) {
+        ch.stalled = { kind: 'auth', message: ((msg.stderr || msg.error || '')).slice(-300) };
+      } else if (/rate limit|usage limit|quota|too many requests/.test(err)) {
+        ch.stalled = { kind: 'rate_limit', message: ((msg.stderr || msg.error || '')).slice(-300) };
+      } else if (msg.exitCode != null && msg.exitCode !== 0) {
+        ch.stalled = { kind: 'exit', message: 'exit ' + msg.exitCode + ': ' + ((msg.stderr || msg.error || '')).slice(-300) };
+      }
+      if (ch.sessionId === activeSid) renderActive();
+    }
     refreshTabState();
+    return;
+  }
+  if (op === 'rate_limit') {
+    if (ch) {
+      const info = msg.info || {};
+      ch.stalled = {
+        kind: 'rate_limit',
+        resetAt: info.resets_at_unix || info.resets_at || null,
+        message: info.message || info.text || 'Claude rate limit',
+      };
+      if (ch.sessionId === activeSid) renderActive();
+    }
     return;
   }
   if (op === 'restarted') {
@@ -364,6 +388,7 @@ function onMsg(msg) {
       ch.claudeId = msg.claudeId;
       // turns 는 reset 하지 않음 — 서버가 영속 (--resume) + 새 system 이벤트로 갱신될 것
       ch.pendingDialog = null;
+      ch.stalled = null;
     }
     refreshTabState();
     renderActive();
@@ -742,13 +767,27 @@ async function loadMoreHistory(ch) {
 const LABELS = {
   human:'You', assistant:'Claude',
   tool_call:'Tool', tool_out:'Result',
-  thinking:'Thinking', other:'…',
+  thinking:'Thinking', channel:'IOA',
+  result:'Turn 종료', hook:'Hook', meta:'Meta', other:'기타',
 };
 const COLORS = {
   human:'var(--accent)', assistant:'var(--green)',
   tool_call:'#cba6f7', tool_out:'#f9e2af',
-  thinking:'#74c7ec', other:'var(--muted)',
+  thinking:'#74c7ec', channel:'#94e2d5',
+  result:'var(--muted)', hook:'var(--muted)', meta:'var(--muted)', other:'var(--muted)',
 };
+// 기본 숨김 turn type — 디버그 모드에서만 표시
+const HIDDEN_TYPES_DEFAULT = new Set(['meta', 'hook', 'other']);
+function showDebugEvents() {
+  try { return localStorage.getItem('ec.showDebug') === '1'; } catch { return false; }
+}
+function setShowDebugEvents(v) {
+  try { localStorage.setItem('ec.showDebug', v ? '1' : '0'); } catch {}
+}
+function shouldHideTurn(t) {
+  if (showDebugEvents()) return false;
+  return HIDDEN_TYPES_DEFAULT.has(t.type);
+}
 
 // ── jsonl 페이지네이션 (총 라인 + 더 불러오기) ────────────────────────────────
 async function fetchJsonlInfo(sid) {
@@ -919,18 +958,24 @@ function renderActive() {
   }
   const ch = channels.get(activeSid);
   if (!ch) { $parsed.innerHTML = ''; return; }
-  const turns = [...(ch.histTurns || []), ...(ch.turns || [])];
+  const allTurns = [...(ch.histTurns || []), ...(ch.turns || [])];
+  const visible = allTurns.filter(t => !shouldHideTurn(t));
+  const hiddenCount = allTurns.length - visible.length;
   const pending = ch.pendingInputs || [];
-  if (!turns.length && !pending.length) {
+  if (!visible.length && !pending.length && !hiddenCount) {
     $parsed.innerHTML = '<div class="ec-empty">출력 대기 중…</div>';
     return;
   }
   const wasAtBottom = $parsed.scrollTop + $parsed.clientHeight + 80 >= $parsed.scrollHeight;
-  const turnsHtml = turns.map(t => {
+  const hiddenBanner = hiddenCount > 0
+    ? `<div class="ec-hidden-banner" id="ec-hidden-banner">메타/훅 이벤트 ${hiddenCount}개 숨김 — <a href="#" id="ec-show-debug">디버그 표시</a></div>`
+    : '';
+  const turnsHtml = visible.map(t => {
     const cls = `ec-turn ec-turn-${t.type}` + (t.is_error ? ' ec-error' : '');
+    const labelText = (t.type === 'meta' && t.eventType) ? `${LABELS.meta} · ${t.eventType}` : (LABELS[t.type] || t.type);
     return `
       <div class="${cls}">
-        <div class="ec-turn-label" style="color:${COLORS[t.type]||'var(--muted)'}">${esc(LABELS[t.type] || t.type)}</div>
+        <div class="ec-turn-label" style="color:${COLORS[t.type]||'var(--muted)'}">${esc(labelText)}</div>
         <div class="ec-turn-body ${t.type}">${esc(t.body)}</div>
       </div>`;
   }).join('');
@@ -939,8 +984,90 @@ function renderActive() {
       <div class="ec-turn-label" style="color:${COLORS.human}">You · 전송 중…</div>
       <div class="ec-turn-body human">${esc(p.text)}</div>
     </div>`).join('');
-  $parsed.innerHTML = turnsHtml + pendingHtml;
+  // 인증/리밋 등 fallback banner
+  const stalled = ch.stalled || null;
+  const stalledHtml = stalled ? renderStalledBanner(stalled) : '';
+  $parsed.innerHTML = hiddenBanner + turnsHtml + pendingHtml + stalledHtml;
+  $('ec-show-debug')?.addEventListener('click', e => {
+    e.preventDefault();
+    setShowDebugEvents(true);
+    renderActive();
+  });
+  wireStalledBanner(ch);
   if (wasAtBottom) $parsed.scrollTop = $parsed.scrollHeight;
+}
+
+function renderStalledBanner(s) {
+  // s: { kind: 'auth' | 'rate_limit' | 'exit', message, resetAt? }
+  const ecHomeHint = ' (ec 환경 단일 HOME)';
+  if (s.kind === 'auth') {
+    return `<div class="ec-stalled ec-stalled-auth">
+      <div class="ec-stalled-title">⚠ 인증 필요${ecHomeHint}</div>
+      <div class="ec-stalled-body">${esc(s.message || 'Claude 세션이 인증 실패로 멈췄습니다.')}</div>
+      <div class="ec-stalled-actions">
+        <button class="ec-btn ec-btn-primary" id="stalled-login">로그인 / OAuth</button>
+        <button class="ec-btn" id="stalled-setup-token">장기 토큰 발급</button>
+        <button class="ec-btn" id="stalled-restart">세션 재기동</button>
+      </div>
+    </div>`;
+  }
+  if (s.kind === 'rate_limit') {
+    const resetTxt = s.resetAt ? new Date(s.resetAt * 1000).toLocaleString() : null;
+    return `<div class="ec-stalled ec-stalled-rate">
+      <div class="ec-stalled-title">⏳ 사용량 한도 도달</div>
+      <div class="ec-stalled-body">${esc(s.message || 'Claude rate limit. 다음 윈도까지 대기 또는 다른 모델로 재기동.')}${resetTxt ? ' · 해제 예정: ' + esc(resetTxt) : ''}</div>
+      <div class="ec-stalled-actions">
+        <button class="ec-btn" id="stalled-wait">자동 재시도 대기</button>
+        <button class="ec-btn" id="stalled-switch-model">다른 모델로 재기동</button>
+        <button class="ec-btn" id="stalled-restart">세션 재기동</button>
+      </div>
+    </div>`;
+  }
+  return `<div class="ec-stalled">
+    <div class="ec-stalled-title">⚠ 세션 멈춤</div>
+    <div class="ec-stalled-body">${esc(s.message || '세션이 종료됐거나 응답하지 않습니다.')}</div>
+    <div class="ec-stalled-actions">
+      <button class="ec-btn ec-btn-primary" id="stalled-restart">재기동</button>
+    </div>
+  </div>`;
+}
+async function wireStalledBanner(ch) {
+  $('stalled-login')?.addEventListener('click', async () => {
+    try {
+      const r = await fetch(apiBase() + 'api/ec-home');
+      const h = await r.json();
+      if (h && h.home) openLogin(h.home);
+    } catch {}
+  });
+  $('stalled-setup-token')?.addEventListener('click', async () => {
+    try {
+      const r = await fetch(apiBase() + 'api/ec-home');
+      const h = await r.json();
+      if (h && h.home) { openLogin(h.home); setTimeout(() => $('lg-setup-token')?.click(), 100); }
+    } catch {}
+  });
+  $('stalled-restart')?.addEventListener('click', () => {
+    sendWs({ op: 'restart_session', id: nextClientId++, sessionId: ch.sessionId });
+    ch.stalled = null;
+    renderActive();
+  });
+  $('stalled-wait')?.addEventListener('click', () => {
+    ch.stalled = { ...ch.stalled, message: '자동 재시도 대기 중 — 윈도 해제 시 자동 재기동' };
+    // 윈도 시각이 있으면 그 시점에 자동 재기동
+    if (ch.stalled.resetAt) {
+      const ms = ch.stalled.resetAt * 1000 - Date.now() + 5000;
+      if (ms > 0) setTimeout(() => {
+        sendWs({ op: 'restart_session', id: nextClientId++, sessionId: ch.sessionId });
+        ch.stalled = null;
+        renderActive();
+      }, Math.min(ms, 6 * 3600 * 1000));
+    }
+    renderActive();
+  });
+  $('stalled-switch-model')?.addEventListener('click', () => {
+    // info 모달에 모델 변경 UI 있음 — 그쪽으로 안내
+    $('ec-info-btn')?.click();
+  });
 }
 
 function fmtNum(n) { return (n || 0).toLocaleString(); }
@@ -1557,9 +1684,9 @@ async function renderHomesList() {
           ${overlayBadge}
         </div>
         <div class="ec-home-actions">
-          <button class="ec-btn" id="ec-home-edit-btn" data-home="${esc(h.home)}">settings.json 편집</button>
           <button class="ec-btn" id="ec-home-login-btn" data-home="${esc(h.home)}">로그인</button>
           <button class="ec-btn" id="ec-home-logout-btn" data-home="${esc(h.home)}">로그아웃</button>
+          <details style="margin-top:6px;width:100%"><summary style="cursor:pointer;font-size:11.5px;color:var(--muted)">고급: claude settings.json 직접 편집</summary><div style="margin-top:6px"><button class="ec-btn" id="ec-home-edit-btn" data-home="${esc(h.home)}">settings.json 편집…</button></div></details>
         </div>
       </div>`;
     // auth status
@@ -1770,31 +1897,74 @@ document.addEventListener('keydown', (e) => {
   if (top) { e.preventDefault(); top.classList.add('ec-hidden'); }
 });
 
-// ── ec config (config.json) 편집 ─────────────────────────────────────────────
+// ── ec config 편집 (스니펫 form + 고급 JSON) ─────────────────────────────────
 async function openEcConfigEdit() {
-  $('ece-content').value = '로드 중…';
   $('ece-message').textContent = '';
-  $('ece-message').style.color = 'var(--danger)';
+  $('ece-message').style.color = 'var(--text-2)';
   $('ec-econfig-edit').classList.remove('ec-hidden');
   try {
     const r = await fetch(apiBase() + 'api/ec-config');
     const data = await r.json();
-    if (!r.ok || data.error) { $('ece-message').textContent = data.error || ('HTTP ' + r.status); return; }
+    if (!r.ok || data.error) {
+      $('ece-message').style.color = 'var(--danger)';
+      $('ece-message').textContent = data.error || ('HTTP ' + r.status); return;
+    }
     $('ece-path-label').textContent = data.path || '';
-    $('ece-content').value = data.content;
+    $('ece-content').value = data.content || '{}';
+    let cfg = {};
+    try { cfg = JSON.parse(data.content || '{}'); } catch {}
+    // 스니펫 form 채우기 (default ON 정책 일관)
+    const overlayEnabled = !(cfg.overlay && cfg.overlay.enabled === false);
+    $('ece-overlay-enabled').checked    = overlayEnabled;
+    $('ece-claudemd-user-ref').checked  = !!(cfg.overlay?.claudeMd?.refs?.user);
+    $('ece-fmt-markdown').checked       = !!(cfg.formatting?.markdown);
+    $('ece-fmt-mathjax').checked        = !!(cfg.formatting?.mathJax);
+    $('ece-fmt-extra').value            = cfg.formatting?.extraPrompt || '';
+    $('ece-bash-shortcut').checked      = !(cfg.bashShortcut === false);
   } catch (e) {
+    $('ece-message').style.color = 'var(--danger)';
     $('ece-message').textContent = '로드 실패: ' + e.message;
   }
 }
 $('cfg-ec-edit-btn')?.addEventListener('click', openEcConfigEdit);
+
+// 디버그 토글 (메타/훅 이벤트 표시)
+const _cfgShowDebug = $('cfg-show-debug');
+if (_cfgShowDebug) {
+  _cfgShowDebug.checked = showDebugEvents();
+  _cfgShowDebug.addEventListener('change', () => {
+    setShowDebugEvents(_cfgShowDebug.checked);
+    renderActive();
+  });
+}
 $('ece-close')?.addEventListener('click', () => $('ec-econfig-edit').classList.add('ec-hidden'));
 $('ece-cancel')?.addEventListener('click', () => $('ec-econfig-edit').classList.add('ec-hidden'));
 $('ec-econfig-edit')?.addEventListener('click', e => { if (e.target.id === 'ec-econfig-edit') $('ec-econfig-edit').classList.add('ec-hidden'); });
 $('ece-save')?.addEventListener('click', async () => {
-  const content = $('ece-content').value;
   $('ece-message').style.color = 'var(--text-2)';
   $('ece-message').textContent = '저장 중…';
   try {
+    // 고급 탭(textarea)의 JSON을 baseline으로 삼고 form 값을 머지 (form이 우선)
+    let cfg;
+    try { cfg = JSON.parse($('ece-content').value || '{}'); }
+    catch (e) {
+      $('ece-message').style.color = 'var(--danger)';
+      $('ece-message').textContent = '고급 탭 JSON 파스 실패: ' + e.message;
+      return;
+    }
+    cfg.overlay = cfg.overlay || {};
+    cfg.overlay.enabled = $('ece-overlay-enabled').checked;
+    cfg.overlay.claudeMd = cfg.overlay.claudeMd || {};
+    cfg.overlay.claudeMd.refs = cfg.overlay.claudeMd.refs || {};
+    cfg.overlay.claudeMd.refs.user = $('ece-claudemd-user-ref').checked;
+    cfg.formatting = cfg.formatting || {};
+    cfg.formatting.markdown = $('ece-fmt-markdown').checked;
+    cfg.formatting.mathJax  = $('ece-fmt-mathjax').checked;
+    const extra = ($('ece-fmt-extra').value || '').trim();
+    if (extra) cfg.formatting.extraPrompt = extra;
+    else delete cfg.formatting.extraPrompt;
+    cfg.bashShortcut = $('ece-bash-shortcut').checked;
+    const content = JSON.stringify(cfg, null, 2);
     const r = await fetch(apiBase() + 'api/ec-config', {
       method: 'PUT',
       headers: {'Content-Type':'application/json'},
@@ -1808,6 +1978,8 @@ $('ece-save')?.addEventListener('click', async () => {
     }
     $('ece-message').style.color = 'var(--green)';
     $('ece-message').textContent = '저장됨 — ' + (data.hint || '재기동 필요');
+    // 고급 탭도 갱신 (사용자가 다시 펼쳤을 때 일관)
+    $('ece-content').value = content;
   } catch (e) {
     $('ece-message').style.color = 'var(--danger)';
     $('ece-message').textContent = '오류: ' + e.message;

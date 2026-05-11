@@ -14,6 +14,13 @@ const { startWatcher: startInboxWatcher, eventToChannelText, detectAgentIdentity
 // ── auth process tracking (login OAuth 플로우 상태) ─────────────────────────
 const authProcs = new Map(); // home → { proc, url, status, output, error, exitCode }
 
+// 세션이 jsonl을 찾아야 할 HOME 후보 — overlay HOME 우선
+function homesForSession(sess) {
+  const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
+  const overlayHome = path.join(XDG_DATA_HOME, 'easyclaude', 'overlay');
+  return [sess?.home, overlayEnabled ? overlayHome : null, process.env.HOME].filter(Boolean);
+}
+
 // jsonl → turns 캐시 (대화창 위 스크롤 history용)
 const _jsonlTurnsCache = new Map(); // jsonlPath → { mtime, turns }
 function jsonlToTurns(jsonlPath) {
@@ -460,11 +467,15 @@ function getClaudeOptions() {
   return _cachedOptions;
 }
 
-function claudeJsonlExists(claudeId) {
-  if (!fs.existsSync(CLAUDE_PROJECTS)) return false;
+function claudeJsonlExists(claudeId, homeOverride) {
+  // spawn 시 사용할 실제 HOME 기준으로 jsonl 존재 확인 (overlay HOME일 때 중요)
+  const projectsRoot = homeOverride
+    ? path.join(homeOverride, '.claude', 'projects')
+    : CLAUDE_PROJECTS;
+  if (!fs.existsSync(projectsRoot)) return false;
   try {
-    for (const d of fs.readdirSync(CLAUDE_PROJECTS)) {
-      if (fs.existsSync(path.join(CLAUDE_PROJECTS, d, claudeId + '.jsonl'))) return true;
+    for (const d of fs.readdirSync(projectsRoot)) {
+      if (fs.existsSync(path.join(projectsRoot, d, claudeId + '.jsonl'))) return true;
     }
   } catch {}
   return false;
@@ -1009,7 +1020,7 @@ const server = http.createServer((req, res) => {
       return res.end(JSON.stringify({ ok:true, turns: [], total: 0, start: 0, end: 0, hint: 'no claudeId yet' }));
     }
     const sess = findSession(sid);
-    const homes = [sess?.home, process.env.HOME].filter(Boolean);
+    const homes = homesForSession(sess);
     let jsonlPath = null;
     for (const h of homes) {
       const projectsDir = path.join(h, '.claude', 'projects');
@@ -1056,7 +1067,7 @@ const server = http.createServer((req, res) => {
     }
     // jsonl path 찾기 (jsonl-path와 동일 로직)
     const sess = findSession(sid);
-    const homes = [sess?.home, process.env.HOME].filter(Boolean);
+    const homes = homesForSession(sess);
     let jsonlPath = null;
     for (const h of homes) {
       const projectsDir = path.join(h, '.claude', 'projects');
@@ -1109,7 +1120,7 @@ const server = http.createServer((req, res) => {
     // 모든 home + projects 디렉토리 탐색
     const candidates = [];
     const sess = findSession(sid);
-    const homes = [sess?.home, process.env.HOME].filter(Boolean);
+    const homes = homesForSession(sess);
     for (const h of homes) {
       const projectsDir = path.join(h, '.claude', 'projects');
       if (!fs.existsSync(projectsDir)) continue;
@@ -1281,15 +1292,18 @@ function buildSpawnArgs(sess) {
     args.push('--append-system-prompt', fmtPrompt);
   }
 
+  // jsonl 검색은 실제 spawn 대상 HOME 기준 — overlay 활성 시 process HOME에 있어도 의미 없음.
+  const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
+  const targetHome = sess.home || (overlayEnabled ? path.join(XDG_DATA_HOME, 'easyclaude', 'overlay') : process.env.HOME);
   const saved = sessionState[sess.id];
   const existingId = saved?.claudeId;
   if (existingId) {
     // jsonl 파일 존재 확인 — 없으면 새 session-id 로 fallback
-    if (claudeJsonlExists(existingId)) {
+    if (claudeJsonlExists(existingId, targetHome)) {
       args.push('--resume', existingId);
       return { args, isNew: false, claudeId: existingId, injectedEnv };
     } else {
-      console.warn(`[easyclaude] resume target jsonl missing for ${sess.id} (claudeId=${existingId}); starting new session`);
+      console.warn(`[easyclaude] resume target jsonl missing for ${sess.id} (claudeId=${existingId}) in ${targetHome}; starting new session`);
     }
   }
   const newId = randomUUID();
@@ -1357,6 +1371,7 @@ function spawnSession(sess) {
         ch.broadcast({ op: 'dialog', kind: 'AskUserQuestion', tool_use_id, input });
       },
       onHook: (evt) => ch.broadcast({ op: 'hook', event: evt }),
+      onRateLimit: (info) => ch.broadcast({ op: 'rate_limit', info }),
     });
   }
 
