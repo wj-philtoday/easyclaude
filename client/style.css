@@ -1122,7 +1122,12 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 .ec-ext-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; cursor: pointer; }
 .ec-ext-row input[type="checkbox"] { width: auto; margin: 0; cursor: pointer; }
 .ec-ext-row code { font-family: var(--mono); font-size: 11.5px; }
-.ec-ext-meta { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
+.ec-ext-meta { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; flex: 1; }
+.ec-ext-name { flex: 0 0 auto; }
+.ec-ext-actions { margin-left: auto; display: flex; gap: 4px; flex-shrink: 0; }
+.ec-ext-actions .ec-btn { padding: 1px 6px; font-size: 11.5px; min-width: 24px; }
+.ec-ext-scope-head { display: flex; align-items: center; gap: 8px; }
+.ec-ext-add { margin-left: auto; }
 
 .ec-info-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .ec-tag {

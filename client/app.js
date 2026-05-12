@@ -1628,6 +1628,7 @@ const SCOPE_ORDER = ['user', 'project', 'local'];
 async function loadAndRenderExtensions(sid) {
   const $el = $('ec-ext-list');
   if (!$el) return;
+  $el.dataset.sid = sid;
   try {
     const r = await fetch(apiBase() + 'api/scoped/extensions?sid=' + encodeURIComponent(sid));
     const d = await r.json();
@@ -1645,30 +1646,37 @@ async function loadAndRenderExtensions(sid) {
       }
       const rows = SCOPE_ORDER.map(scope => {
         const list = byScope[scope] || [];
-        if (!list.length) return '';
+        const addBtn = `<button type="button" class="ec-btn ec-ext-add" data-kind="${sec.key}" data-scope="${scope}" style="font-size:11px;padding:1px 6px">＋ 추가</button>`;
+        const head = `<div class="ec-ext-scope-head"><b>${esc(SCOPE_LABEL[scope])}</b> <span class="ec-muted">(${list.length})</span> ${addBtn}</div>`;
+        if (!list.length) return `<div class="ec-ext-scope">${head}</div>`;
         return `
           <div class="ec-ext-scope">
-            <div class="ec-ext-scope-head"><b>${esc(SCOPE_LABEL[scope])}</b> <span class="ec-muted">(${list.length})</span></div>
+            ${head}
             ${list.map(it => `
-              <label class="ec-ext-row">
+              <div class="ec-ext-row">
                 <input type="checkbox" class="ec-ext-toggle"
                   data-kind="${sec.key}" data-scope="${esc(it.scope)}" data-name="${esc(it.name)}"
-                  ${it.enabled ? 'checked' : ''}>
-                <code>${esc(it.name)}</code>
+                  ${it.enabled ? 'checked' : ''} title="활성/비활성">
+                <code class="ec-ext-name">${esc(it.name)}</code>
                 ${sec.key === 'mcp' && it.config?.command ? `<span class="ec-muted ec-ext-meta">${esc(it.config.command)}${(it.config.args||[]).length?' '+esc((it.config.args||[]).slice(0,2).join(' ')):''}</span>` : ''}
                 ${sec.key === 'mcp' && it.config?.url ? `<span class="ec-muted ec-ext-meta">${esc(it.config.url)}</span>` : ''}
                 ${sec.key === 'skill' && it.symlink ? `<span class="ec-muted ec-ext-meta">(symlink)</span>` : ''}
-              </label>
+                <span class="ec-ext-actions">
+                  ${sec.key === 'mcp' ? `<button type="button" class="ec-btn ec-ext-reconnect" data-name="${esc(it.name)}" title="이 세션에 /mcp slash 보냄">↻</button>` : ''}
+                  <button type="button" class="ec-btn ec-ext-edit" data-kind="${sec.key}" data-scope="${esc(it.scope)}" data-name="${esc(it.name)}" title="편집">✎</button>
+                </span>
+              </div>
             `).join('')}
           </div>`;
-      }).filter(Boolean).join('');
+      }).join('');
       return `
         <details class="ec-ext-cat" open>
           <summary><b>${esc(sec.label)}</b> <span class="ec-muted">(${sec.items.length})</span></summary>
-          ${rows || '<div class="ec-empty">없음</div>'}
+          ${rows}
         </details>`;
     };
     $el.innerHTML = sections.map(renderSection).join('');
+    // 토글
     $el.querySelectorAll('.ec-ext-toggle').forEach(cb => {
       cb.addEventListener('change', async () => {
         const kind  = cb.dataset.kind;
@@ -1682,21 +1690,214 @@ async function loadAndRenderExtensions(sid) {
             body: JSON.stringify({ sid, scope, kind, name, enabled }),
           });
           const data = await r2.json();
-          if (!r2.ok || data.error) {
-            alert(data.error || ('HTTP ' + r2.status));
-            cb.checked = !enabled;
-          }
-        } catch (e) {
-          alert('오류: ' + e.message);
-          cb.checked = !enabled;
-        }
+          if (!r2.ok || data.error) { alert(data.error || ('HTTP ' + r2.status)); cb.checked = !enabled; }
+        } catch (e) { alert('오류: ' + e.message); cb.checked = !enabled; }
         cb.disabled = false;
+      });
+    });
+    // +추가
+    $el.querySelectorAll('.ec-ext-add').forEach(b => {
+      b.addEventListener('click', () => openExtEdit({ sid, scope: b.dataset.scope, kind: b.dataset.kind, name: '', isNew: true }));
+    });
+    // 편집
+    $el.querySelectorAll('.ec-ext-edit').forEach(b => {
+      b.addEventListener('click', () => openExtEdit({ sid, scope: b.dataset.scope, kind: b.dataset.kind, name: b.dataset.name, isNew: false }));
+    });
+    // mcp 재연결 (해당 세션에 /mcp slash 보냄)
+    $el.querySelectorAll('.ec-ext-reconnect').forEach(b => {
+      b.addEventListener('click', async () => {
+        if (!confirm(`'${b.dataset.name}' (또는 전체) MCP 재연결을 위해 활성 세션에 /mcp 를 보냅니다. 진행할까요?`)) return;
+        b.disabled = true;
+        try {
+          const r2 = await fetch(apiBase() + `api/sessions/${encodeURIComponent(sid)}/inject`, {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ text: '/mcp' }),
+          });
+          const data = await r2.json();
+          if (!r2.ok || data.error) alert(data.error || ('HTTP ' + r2.status));
+        } catch (e) { alert('오류: ' + e.message); }
+        b.disabled = false;
       });
     });
   } catch (e) {
     $el.innerHTML = `<div class="ec-empty">로드 실패: ${esc(e.message)}</div>`;
   }
 }
+
+// ── 확장 편집 모달 ──────────────────────────────────────────────────────────
+async function openExtEdit({ sid, scope, kind, name, isNew }) {
+  $('exe-message').textContent = '';
+  $('exe-title').textContent = (isNew ? '새 ' : '편집 — ') + ({mcp:'MCP 서버', plugin:'Plugin', skill:'Skill'}[kind] || kind);
+  $('exe-scope').value = scope;
+  $('exe-kind').textContent = kind;
+  $('exe-name').value = name || '';
+  $('exe-name').readOnly = false;
+  $('exe-delete').style.display = isNew ? 'none' : '';
+  // 컨테이너 토글
+  $('exe-mcp').classList.toggle('ec-hidden', kind !== 'mcp');
+  $('exe-plugin').classList.toggle('ec-hidden', kind !== 'plugin');
+  $('exe-skill').classList.toggle('ec-hidden', kind !== 'skill');
+  // 초기 빈값
+  if (kind === 'mcp') {
+    $('exe-mcp-type').value = 'stdio';
+    $('exe-mcp-command').value = '';
+    $('exe-mcp-args').value = '';
+    $('exe-mcp-url-val').value = '';
+    $('exe-mcp-env').value = '';
+  } else if (kind === 'plugin') {
+    $('exe-plugin-enabled').checked = true;
+    $('exe-plugin-config').value = '';
+  } else if (kind === 'skill') {
+    $('exe-skill-content').value = '---\nname: ' + (name || 'new-skill') + '\ndescription: \n---\n\n';
+  }
+  $('exe-raw').value = '';
+  // dataset에 컨텍스트 보관
+  $('ec-ext-edit').dataset.sid = sid;
+  $('ec-ext-edit').dataset.oldName = name || '';
+  $('ec-ext-edit').dataset.isNew = isNew ? '1' : '0';
+  $('ec-ext-edit').classList.remove('ec-hidden');
+  // 기존 항목 details 로드
+  if (!isNew && name) {
+    try {
+      const r = await fetch(apiBase() + `api/scoped/extension/details?sid=${encodeURIComponent(sid)}&scope=${encodeURIComponent(scope)}&kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}`);
+      const d = await r.json();
+      if (!d.ok) { $('exe-message').textContent = d.error || 'load fail'; return; }
+      if (kind === 'mcp') {
+        const c = d.config || {};
+        if (c.url) {
+          $('exe-mcp-type').value = c.type || 'http';
+          $('exe-mcp-url-val').value = c.url;
+        } else {
+          $('exe-mcp-type').value = 'stdio';
+          $('exe-mcp-command').value = c.command || '';
+          $('exe-mcp-args').value = Array.isArray(c.args) ? c.args.join('\n') : '';
+        }
+        $('exe-mcp-env').value = c.env ? Object.entries(c.env).map(([k,v]) => `${k}=${v}`).join('\n') : '';
+        $('exe-raw').value = JSON.stringify(c, null, 2);
+      } else if (kind === 'plugin') {
+        const c = d.config || {};
+        $('exe-plugin-enabled').checked = c.enabled !== false;
+        $('exe-plugin-config').value = JSON.stringify(c, null, 2);
+        $('exe-raw').value = JSON.stringify(c, null, 2);
+      } else if (kind === 'skill') {
+        $('exe-skill-content').value = d.content || '';
+      }
+    } catch (e) {
+      $('exe-message').textContent = '로드 실패: ' + e.message;
+    }
+  }
+  syncMcpFormVisibility();
+}
+
+function syncMcpFormVisibility() {
+  const t = $('exe-mcp-type')?.value;
+  if (!t) return;
+  const isStdio = t === 'stdio';
+  $('exe-mcp-stdio')?.classList.toggle('ec-hidden', !isStdio);
+  $('exe-mcp-url')?.classList.toggle('ec-hidden', isStdio);
+}
+$('exe-mcp-type')?.addEventListener('change', syncMcpFormVisibility);
+
+$('exe-close')?.addEventListener('click', () => $('ec-ext-edit').classList.add('ec-hidden'));
+$('exe-cancel')?.addEventListener('click', () => $('ec-ext-edit').classList.add('ec-hidden'));
+
+function buildExtConfigFromForm(kind) {
+  if (kind === 'mcp') {
+    const raw = $('exe-raw').value.trim();
+    if (raw) { try { return JSON.parse(raw); } catch (e) { throw new Error('raw JSON 파스 실패: ' + e.message); } }
+    const type = $('exe-mcp-type').value;
+    const envStr = ($('exe-mcp-env').value || '').trim();
+    const env = {};
+    if (envStr) {
+      for (const line of envStr.split('\n')) {
+        const m = line.match(/^([^=]+)=(.*)$/);
+        if (m) env[m[1].trim()] = m[2];
+      }
+    }
+    if (type === 'stdio') {
+      const args = ($('exe-mcp-args').value || '').split('\n').map(s => s.trim()).filter(Boolean);
+      const c = { command: $('exe-mcp-command').value.trim() };
+      if (args.length) c.args = args;
+      if (Object.keys(env).length) c.env = env;
+      return c;
+    } else {
+      const c = { type, url: $('exe-mcp-url-val').value.trim() };
+      if (Object.keys(env).length) c.env = env;
+      return c;
+    }
+  }
+  if (kind === 'plugin') {
+    const raw = ($('exe-plugin-config').value || '').trim();
+    let c = {};
+    if (raw) { try { c = JSON.parse(raw); } catch (e) { throw new Error('plugin config JSON 파스 실패: ' + e.message); } }
+    c.enabled = $('exe-plugin-enabled').checked;
+    return c;
+  }
+  return null;
+}
+
+$('exe-save')?.addEventListener('click', async () => {
+  const sid = $('ec-ext-edit').dataset.sid;
+  const kind = $('exe-kind').textContent;
+  const scope = $('exe-scope').value;
+  const name = ($('exe-name').value || '').trim();
+  const oldName = $('ec-ext-edit').dataset.oldName;
+  if (!name) { $('exe-message').textContent = 'name 필요'; return; }
+  $('exe-message').style.color = 'var(--text-2)';
+  $('exe-message').textContent = '저장 중…';
+  try {
+    let bodyPayload = { sid, scope, kind, name, oldName };
+    if (kind === 'skill') {
+      bodyPayload.config = $('exe-skill-content').value;
+    } else {
+      bodyPayload.config = buildExtConfigFromForm(kind);
+    }
+    const r = await fetch(apiBase() + 'api/scoped/extension/save', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(bodyPayload),
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) {
+      $('exe-message').style.color = 'var(--danger)';
+      $('exe-message').textContent = data.error || ('HTTP ' + r.status);
+      return;
+    }
+    $('exe-message').style.color = 'var(--green)';
+    $('exe-message').textContent = '✓ 저장됨 — ' + (data.hint || '재기동/재연결 필요');
+    setTimeout(() => {
+      $('ec-ext-edit').classList.add('ec-hidden');
+      loadAndRenderExtensions(sid);
+    }, 800);
+  } catch (e) {
+    $('exe-message').style.color = 'var(--danger)';
+    $('exe-message').textContent = '오류: ' + e.message;
+  }
+});
+
+$('exe-delete')?.addEventListener('click', async () => {
+  const sid = $('ec-ext-edit').dataset.sid;
+  const kind = $('exe-kind').textContent;
+  const scope = $('exe-scope').value;
+  const name = $('exe-name').value;
+  if (!confirm(`${kind} '${name}' (scope=${scope}) 삭제할까요?`)) return;
+  try {
+    const r = await fetch(apiBase() + 'api/scoped/extension/delete', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sid, scope, kind, name }),
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) {
+      $('exe-message').style.color = 'var(--danger)';
+      $('exe-message').textContent = data.error || ('HTTP ' + r.status);
+      return;
+    }
+    $('ec-ext-edit').classList.add('ec-hidden');
+    loadAndRenderExtensions(sid);
+  } catch (e) {
+    $('exe-message').style.color = 'var(--danger)';
+    $('exe-message').textContent = '오류: ' + e.message;
+  }
+});
 
 $('ec-info-btn')?.addEventListener('click', openInfoPanel);
 $('info-close')?.addEventListener('click', () => $('ec-info').classList.add('ec-hidden'));

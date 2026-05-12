@@ -864,6 +864,218 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify({ ok: true, sid, cwd, ovHome, ...out }));
   }
 
+  // /api/scoped/extension/details?sid=&scope=&kind=&name=
+  // 특정 항목의 raw config 반환 (mcp/plugin: settings.json 안 객체. skill: SKILL.md content)
+  if (req.url.startsWith('/api/scoped/extension/details')) {
+    const u = new URL(req.url, 'http://x');
+    const sid = u.searchParams.get('sid') || '';
+    const scope = u.searchParams.get('scope') || '';
+    const kind = u.searchParams.get('kind') || '';
+    const name = u.searchParams.get('name') || '';
+    const sess = findSession(sid);
+    const ovHome = (() => {
+      const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
+      try { return overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+      catch { return process.env.HOME; }
+    })();
+    const cwd = sess?.cwd || null;
+    const file = (
+      scope === 'user' ? path.join(ovHome, '.claude', 'settings.json') :
+      scope === 'project' && cwd ? path.join(cwd, '.claude', 'settings.json') :
+      scope === 'local' && cwd ? path.join(cwd, '.claude', 'settings.local.json') :
+      null
+    );
+    const scopeDir = file ? path.dirname(file) : null;
+    if (kind === 'skill') {
+      if (!scopeDir) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope' })); }
+      const skillPath = path.join(scopeDir, 'skills', name, 'SKILL.md');
+      let content = '';
+      try { content = fs.readFileSync(skillPath, 'utf8'); }
+      catch (e) { res.writeHead(404, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'skill not found', path: skillPath })); }
+      res.writeHead(200, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ ok: true, kind, scope, name, path: skillPath, content }));
+    }
+    // mcp / plugin
+    if (!file) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope' })); }
+    let s = {};
+    try { s = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {}; } catch (e) {
+      res.writeHead(500, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ error: 'parse fail: ' + e.message }));
+    }
+    let config = null;
+    if (kind === 'mcp') config = (s.mcpServers || {})[name] || null;
+    else if (kind === 'plugin') config = (s.plugins || {})[name] || null;
+    res.writeHead(200, {'Content-Type':'application/json'});
+    return res.end(JSON.stringify({ ok: true, kind, scope, name, file, config }));
+  }
+
+  // /api/scoped/extension/save  POST {sid, scope, kind, name, config, oldName?}
+  // mcp/plugin: settings.json 안 객체에 set (oldName 있으면 rename)
+  // skill: scopeDir/skills/<name>/SKILL.md 에 content (config 자리에 content string)
+  if (req.url === '/api/scoped/extension/save') {
+    if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
+    return readJsonBody(req, (err, body) => {
+      if (err) { res.writeHead(400); return res.end(err.message); }
+      const { sid, scope, kind, name, oldName } = body || {};
+      const config = body?.config;
+      if (!scope || !kind || !name) {
+        res.writeHead(400, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: 'scope/kind/name required' }));
+      }
+      const sess = findSession(sid || '');
+      const ovHome = (() => {
+        const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
+        try { return overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+        catch { return process.env.HOME; }
+      })();
+      const cwd = sess?.cwd || null;
+      const file = (
+        scope === 'user' ? path.join(ovHome, '.claude', 'settings.json') :
+        scope === 'project' && cwd ? path.join(cwd, '.claude', 'settings.json') :
+        scope === 'local' && cwd ? path.join(cwd, '.claude', 'settings.local.json') :
+        null
+      );
+      const scopeDir = file ? path.dirname(file) : null;
+      if (kind === 'skill') {
+        if (!scopeDir) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope' })); }
+        if (!/^[A-Za-z0-9_.-]+$/.test(name)) {
+          res.writeHead(400, {'Content-Type':'application/json'});
+          return res.end(JSON.stringify({ error: 'skill name must match [A-Za-z0-9_.-]+' }));
+        }
+        const skillDir = path.join(scopeDir, 'skills', name);
+        const skillPath = path.join(skillDir, 'SKILL.md');
+        try {
+          // rename 케이스
+          if (oldName && oldName !== name) {
+            const oldDir = path.join(scopeDir, 'skills', oldName);
+            if (fs.existsSync(oldDir) && !fs.existsSync(skillDir)) {
+              fs.renameSync(oldDir, skillDir);
+            }
+          }
+          ensureDir(skillDir);
+          fs.writeFileSync(skillPath, String(config ?? ''));
+          res.writeHead(200, {'Content-Type':'application/json'});
+          return res.end(JSON.stringify({ ok: true, file: skillPath }));
+        } catch (e) {
+          res.writeHead(500, {'Content-Type':'application/json'});
+          return res.end(JSON.stringify({ error: e.message }));
+        }
+      }
+      // mcp / plugin
+      if (!file) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope' })); }
+      let s = {};
+      try { s = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {}; } catch (e) {
+        res.writeHead(500, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: 'parse fail: ' + e.message }));
+      }
+      const objKey = kind === 'mcp' ? 'mcpServers' : 'plugins';
+      s[objKey] = (s[objKey] && typeof s[objKey] === 'object') ? s[objKey] : {};
+      if (oldName && oldName !== name && s[objKey][oldName] != null) {
+        delete s[objKey][oldName];
+      }
+      if (config == null || typeof config !== 'object') {
+        res.writeHead(400, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: 'config object required for mcp/plugin' }));
+      }
+      s[objKey][name] = config;
+      try {
+        ensureDir(path.dirname(file));
+        fs.writeFileSync(file, JSON.stringify(s, null, 2));
+        res.writeHead(200, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ ok: true, file, hint: '활성 세션에 적용하려면 재기동 또는 /mcp 명령 필요' }));
+      } catch (e) {
+        res.writeHead(500, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  }
+
+  // /api/scoped/extension/delete  POST {sid, scope, kind, name}
+  if (req.url === '/api/scoped/extension/delete') {
+    if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
+    return readJsonBody(req, (err, body) => {
+      if (err) { res.writeHead(400); return res.end(err.message); }
+      const { sid, scope, kind, name } = body || {};
+      if (!scope || !kind || !name) {
+        res.writeHead(400, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: 'scope/kind/name required' }));
+      }
+      const sess = findSession(sid || '');
+      const ovHome = (() => {
+        const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
+        try { return overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+        catch { return process.env.HOME; }
+      })();
+      const cwd = sess?.cwd || null;
+      const file = (
+        scope === 'user' ? path.join(ovHome, '.claude', 'settings.json') :
+        scope === 'project' && cwd ? path.join(cwd, '.claude', 'settings.json') :
+        scope === 'local' && cwd ? path.join(cwd, '.claude', 'settings.local.json') :
+        null
+      );
+      const scopeDir = file ? path.dirname(file) : null;
+      if (kind === 'skill') {
+        if (!scopeDir) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope' })); }
+        const skillDir = path.join(scopeDir, 'skills', name);
+        try {
+          let stat;
+          try { stat = fs.lstatSync(skillDir); } catch { stat = null; }
+          if (stat && stat.isSymbolicLink()) {
+            fs.unlinkSync(skillDir);
+          } else if (stat) {
+            fs.rmSync(skillDir, { recursive: true, force: true });
+          }
+          res.writeHead(200, {'Content-Type':'application/json'});
+          return res.end(JSON.stringify({ ok: true }));
+        } catch (e) {
+          res.writeHead(500, {'Content-Type':'application/json'});
+          return res.end(JSON.stringify({ error: e.message }));
+        }
+      }
+      if (!file || !fs.existsSync(file)) {
+        res.writeHead(200, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ ok: true, hint: 'file not present, nothing to delete' }));
+      }
+      let s = {};
+      try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) {
+        res.writeHead(500, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: 'parse fail: ' + e.message }));
+      }
+      const objKey = kind === 'mcp' ? 'mcpServers' : 'plugins';
+      if (s[objKey] && s[objKey][name] != null) {
+        delete s[objKey][name];
+      }
+      try {
+        fs.writeFileSync(file, JSON.stringify(s, null, 2));
+        res.writeHead(200, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ ok: true, file }));
+      } catch (e) {
+        res.writeHead(500, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  }
+
+  // /api/sessions/<sid>/inject  POST {text}
+  // 활성 세션 stdin에 사용자 텍스트 전달 (slash 명령어 등). ec slash 인터셉트 안 거치고 직접 claude로.
+  {
+    const injectMatch = req.url.match(/^\/api\/sessions\/([^/]+)\/inject$/);
+    if (injectMatch) {
+      if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
+      return readJsonBody(req, (err, body) => {
+        if (err) { res.writeHead(400); return res.end(err.message); }
+        const sid = decodeURIComponent(injectMatch[1]);
+        const text = body && typeof body.text === 'string' ? body.text : '';
+        if (!text) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'text required' })); }
+        const ch = ptyChannels.get(sid);
+        if (!ch) { res.writeHead(404, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'no active channel for sid' })); }
+        const ok = sendUserText(ch, text);
+        res.writeHead(200, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ ok, sid, text: text.length > 200 ? text.slice(0, 200) + '…' : text }));
+      });
+    }
+  }
+
   // /api/scoped/toggle  POST {scope, kind:'mcp'|'plugin'|'skill', name, enabled, sid}
   // scope settings.json에서 해당 항목의 enable 상태 토글 (활성/비활성).
   if (req.url === '/api/scoped/toggle') {
