@@ -89,6 +89,7 @@ chmod +x "$SCRIPTS/postinstall"
 cat > "$RESOURCES/welcome.html" <<HTML
 <!DOCTYPE html>
 <html>
+<head><meta charset="UTF-8"></head>
 <body style="font-family:-apple-system;padding:20px">
   <h2>easyclaude v${VERSION}</h2>
   <p>Claude Code를 브라우저에서 멀티 세션으로 사용할 수 있는 워크벤치입니다.</p>
