@@ -1856,6 +1856,36 @@ $('lg-copy')?.addEventListener('click', () => {
   const url = $('lg-url').value;
   if (url) navigator.clipboard?.writeText(url);
 });
+$('lg-submit-code')?.addEventListener('click', async () => {
+  const home = $('ec-login').dataset.home;
+  const code = ($('lg-code').value || '').trim();
+  if (!code) { $('lg-message').textContent = '코드를 입력하세요'; return; }
+  $('lg-message').textContent = '';
+  $('lg-status').textContent = '⏳ 코드 제출 중…';
+  $('lg-submit-code').disabled = true;
+  try {
+    const r = await fetch(apiBase() + 'api/auth/paste-code', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ home, code }),
+    });
+    const data = await r.json();
+    $('lg-submit-code').disabled = false;
+    if (!r.ok || data.error) {
+      $('lg-message').textContent = data.error || ('HTTP ' + r.status);
+      return;
+    }
+    $('lg-status').textContent = '✅ 코드 전송됨 — 인증 진행 대기 중';
+    $('lg-code').value = '';
+  } catch (e) {
+    $('lg-submit-code').disabled = false;
+    $('lg-message').textContent = '오류: ' + e.message;
+  }
+});
+// 코드 입력란에서 Enter로도 제출
+$('lg-code')?.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); $('lg-submit-code')?.click(); }
+});
 
 async function doLogout(home) {
   if (!confirm(`${home}에서 로그아웃할까요?`)) return;

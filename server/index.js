@@ -822,6 +822,33 @@ const server = http.createServer((req, res) => {
       }, 300);
     });
   }
+  // /api/auth/paste-code — 진행 중 login/setup-token proc의 stdin에 코드 paste + Enter
+  // body: { home, code }
+  if (req.url.startsWith('/api/auth/paste-code')) {
+    if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
+    return readJsonBody(req, (err, body) => {
+      if (err) { res.writeHead(400); return res.end(err.message); }
+      const home = (body && body.home) || process.env.HOME;
+      const code = body && body.code;
+      if (typeof code !== 'string' || !code.trim()) {
+        res.writeHead(400, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: 'code (string) required' }));
+      }
+      const state = authProcs.get(home);
+      if (!state || !state.proc || state.proc.exitCode !== null) {
+        res.writeHead(409, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: 'no active auth process for this home — start login/setup-token first' }));
+      }
+      try {
+        state.proc.stdin.write(code.trim() + '\r');
+        res.writeHead(200, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ ok: true, hint: '폴링으로 status 확인' }));
+      } catch (e) {
+        res.writeHead(500, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  }
   if (req.url.startsWith('/api/auth/logout')) {
     if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
     return readJsonBody(req, (err, body) => {
