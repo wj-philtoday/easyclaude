@@ -9,6 +9,7 @@ const $send = $('ec-send-btn');
 const $interrupt = $('ec-interrupt-btn');
 const $restart = $('ec-restart-btn');
 const $usage = $('ec-usage');
+const $viewbarUsage = $('ec-viewbar-usage');
 const $ham = $('ec-ham');
 const $nav = $('ec-nav');
 const $settingsBtn = $('ec-settings-btn');
@@ -345,7 +346,13 @@ function onMsg(msg) {
     return;
   }
   if (op === 'system') {
-    if (ch) ch.session = msg.session;
+    if (ch) {
+      const prevTitle = ch.session?.customTitle || null;
+      ch.session = msg.session;
+      // claude 측 세션 이름이 바뀌었으면 탭/활성 라벨 sync
+      const newTitle = ch.session?.customTitle || null;
+      if (prevTitle !== newTitle) syncSessionLabel(ch);
+    }
     if (ch && ch.sessionId === activeSid) renderUsage();
     return;
   }
@@ -516,6 +523,23 @@ function appendTabSection(headerLabel, items, groupKey) {
   }
 }
 
+// claude 내부 세션 이름(custom-title)이 있으면 그것 우선, 아니면 ec sess.label
+function effectiveLabel(s) {
+  const ch = channels.get(s.id);
+  return (ch && ch.session && ch.session.customTitle) || s.label || s.id;
+}
+
+// claude custom-title 변경 시 탭 라벨 + 활성 라벨 즉시 sync (전체 재렌더 없이)
+function syncSessionLabel(ch) {
+  const s = ecSessions.find(x => x.id === ch.sessionId);
+  if (!s) return;
+  const label = (ch.session && ch.session.customTitle) || s.label || s.id;
+  ch.label = label;
+  const tab = document.querySelector(`.ec-tab[data-sid="${CSS.escape(ch.sessionId)}"] .ec-tab-label`);
+  if (tab) tab.textContent = label;
+  if (ch.sessionId === activeSid && $activeLabel) $activeLabel.textContent = label;
+}
+
 function createTabElement(s) {
   const btn = document.createElement('button');
   btn.className = 'ec-tab';
@@ -524,7 +548,7 @@ function createTabElement(s) {
   const pinIcon = pref.pinned ? '📌' : '';
   btn.innerHTML = `<span class="ec-dot"></span>` +
     (pinIcon ? `<span class="ec-tab-pin">${pinIcon}</span>` : '') +
-    `<span class="ec-tab-label">${esc(s.label)}</span>` +
+    `<span class="ec-tab-label">${esc(effectiveLabel(s))}</span>` +
     `<span class="ec-tab-menu" title="옵션">⋮</span>` +
     `<span class="ec-tab-x" title="${s.meta?.adhoc ? '제거 (jsonl 보존)' : '보관 (숨기기)'}">✕</span>`;
   btn.addEventListener('click', e => {
@@ -562,6 +586,7 @@ function showTabMenu(s, anchor) {
   menu.style.top  = top + 'px';
   menu.style.maxWidth = (vw - 16) + 'px';
   menu.innerHTML = `
+    <button data-act="rename">✎ 이름 변경…</button>
     <button data-act="pin">${pref.pinned ? '📌 고정 해제' : '📌 고정'}</button>
     ${pref.pinned ? `<button data-act="pin-up">▲ 위로</button>
                      <button data-act="pin-down">▼ 아래로</button>` : ''}
@@ -608,8 +633,13 @@ function showTabMenu(s, anchor) {
       const ans = prompt('그룹 이름 (비우면 그룹 해제):', cur);
       if (ans === null) { close(); return; }
       setTabPref(s.id, { group: ans.trim() || null });
+    } else if (act === 'rename') {
+      const cur = effectiveLabel(s);
+      const ans = prompt('세션 이름 (비우면 기본값으로 복원):', cur);
+      if (ans === null) { close(); return; }
+      sendWs({ op: 'rename_session', id: nextClientId++, sessionId: s.id, label: ans.trim() });
     } else if (act === 'restart') {
-      if (!confirm(`'${s.label}' 세션을 재기동할까요? (claudeId 보존)`)) { close(); return; }
+      if (!confirm(`'${effectiveLabel(s)}' 세션을 재기동할까요? (claudeId 보존)`)) { close(); return; }
       const ch = channels.get(s.id);
       if (ch) sendWs({ op:'restart', id: ch.id });
     } else if (act === 'delete') {
@@ -725,7 +755,9 @@ function activate(sessionId) {
   activeSid = sessionId;
   lastActiveSid = sessionId;     // reconnect 후 자동 복귀용
   const ch = channels.get(sessionId);
-  if ($activeLabel) $activeLabel.textContent = ch?.label || '';
+  const sess = ecSessions.find(x => x.id === sessionId);
+  const label = (ch?.session?.customTitle) || ch?.label || sess?.label || sessionId;
+  if ($activeLabel) $activeLabel.textContent = label;
   refreshTabState();
   renderActive();
   renderUsage();
@@ -1222,9 +1254,19 @@ async function wireStalledBanner(ch) {
 }
 
 function fmtNum(n) { return (n || 0).toLocaleString(); }
+function fmtTok(n) {
+  n = n || 0;
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
+  return String(n);
+}
 function renderUsage() {
   const ch = activeChannel();
-  if (!ch) { $usage.textContent = ''; return; }
+  const setBoth = (text, title) => {
+    if ($usage) { $usage.textContent = text; if (title) $usage.title = title; }
+    if ($viewbarUsage) { $viewbarUsage.textContent = text; if (title) $viewbarUsage.title = title; }
+  };
+  if (!ch) { setBoth('', ''); return; }
   const u = ch.usage;
   const s = ch.session || {};
   const model = s.model || '';
@@ -1237,10 +1279,11 @@ function renderUsage() {
     if (mcpBad) mcp += ` ✕${mcpBad}`;
     if (mcpAuth) mcp += ` ⚠${mcpAuth}`;
   }
-  if (!u) { $usage.textContent = model + mcp; return; }
+  if (!u) { setBoth(model + mcp, ''); return; }
   const total = (u.input || 0) + (u.output || 0) + (u.cache_read || 0);
-  $usage.textContent = `${model} · ${fmtNum(total)} tok${mcp}`;
-  $usage.title = `in: ${fmtNum(u.input)} / out: ${fmtNum(u.output)} / cache_read: ${fmtNum(u.cache_read)} / cache_create: ${fmtNum(u.cache_creation)}\n${(s.mcpServers||[]).map(m=>`${m.name}: ${m.status}`).join('\n')}`;
+  const text = `${model} · ${fmtTok(total)} tok${mcp}`;
+  const title = `model: ${model}\nin: ${fmtNum(u.input)} / out: ${fmtNum(u.output)}\ncache_read: ${fmtNum(u.cache_read)} / cache_create: ${fmtNum(u.cache_creation)}\ntotal: ${fmtNum(total)}\n${(s.mcpServers||[]).map(m=>`${m.name}: ${m.status}`).join('\n')}`;
+  setBoth(text, title);
 }
 
 // ── 입력 ──────────────────────────────────────────────────────────────────────

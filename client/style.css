@@ -1172,6 +1172,23 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 /* ── Welcome (no active session) ──────────────────────────────────────────── */
 .ec-welcome-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin: 10px 0 14px; }
 
+/* viewbar에 표시되는 작은 usage / context 인디케이터 */
+.ec-viewbar-usage {
+  font-size: 11.5px;
+  color: var(--text-2);
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: 10px;
+  margin-right: auto;
+  max-width: 50%;
+  cursor: help;
+}
+@media (max-width: 640px) {
+  .ec-viewbar-usage { display: none; }
+}
+
 /* ── Home dashboard (활성 세션 없을 때 / 타이틀 클릭) ───────────────────── */
 .ec-home {
   flex: 1;

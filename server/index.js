@@ -396,8 +396,13 @@ function normalizeSession(s) {
 function sessions() {
   const fromCfg = (cfg.sessions || []).map(normalizeSession);
   const fromRt  = [...runtimeSessions.values()].map(normalizeSession);
-  // sessionState[id].hidden 인 항목은 목록에서 제외 (purge로 hide된 세션)
-  return [...fromCfg, ...fromRt].filter(s => !sessionState[s.id]?.hidden);
+  const all = [...fromCfg, ...fromRt].filter(s => !sessionState[s.id]?.hidden);
+  // sessionState[id].labelOverride 가 있으면 우선 적용
+  return all.map(s => {
+    const override = sessionState[s.id]?.labelOverride;
+    if (override) return { ...s, label: override };
+    return s;
+  });
 }
 
 function findSession(id) {
@@ -2153,6 +2158,19 @@ wss.on('connection', ws => {
       if (targetClaudeId) removedFiles = deleteClaudeSessionFile(targetClaudeId);
       broadcastSessions();
       return send({ op: 'session_purged', id, sessionId, claudeId: targetClaudeId, removedFiles, hidden: isCfg });
+    }
+
+    if (op === 'rename_session') {
+      const { sessionId, label } = msg;
+      const sess = sessions().find(s => s.id === sessionId);
+      if (!sess) return send({ op: 'error', id, message: `unknown session: ${sessionId}` });
+      const cleaned = (label || '').toString().trim();
+      sessionState[sessionId] = sessionState[sessionId] || {};
+      if (cleaned) sessionState[sessionId].labelOverride = cleaned;
+      else delete sessionState[sessionId].labelOverride;
+      saveState(sessionState);
+      broadcastSessions();
+      return send({ op: 'session_renamed', id, sessionId, label: cleaned || sess.label });
     }
 
     if (op === 'unhide_session') {
