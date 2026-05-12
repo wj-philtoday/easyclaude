@@ -760,6 +760,18 @@ function refreshTabState() {
     t.classList.toggle('connected', !!(ch && ch.alive));
     t.classList.toggle('disconnected', !!(ch && !ch.alive));
   });
+  updateInputBar();
+}
+
+// 에이전트 활동 중: interrupt 버튼 + restart 버튼 표시, send 숨김
+// 대기/비활성: send 버튼 표시, interrupt 숨김, restart 숨김
+function updateInputBar() {
+  const ch = activeChannel();
+  const alive = !!(ch && ch.alive);
+  const hasSession = !!activeSid;
+  $interrupt?.classList.toggle('ec-hidden', !alive);
+  $('ec-send-btn')?.classList.toggle('ec-hidden', alive);
+  $restart?.classList.toggle('ec-hidden', !hasSession);
 }
 
 function activate(sessionId) {

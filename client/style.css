@@ -509,7 +509,7 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
   border-color: var(--accent-3);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-3) 18%, transparent);
 }
-#ec-send-btn {
+#ec-send-btn, .ec-send-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -519,11 +519,15 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
   color: var(--accent);
   flex-shrink: 0;
   align-self: stretch;
+  cursor: pointer;
   transition: color 0.12s, transform 0.05s;
 }
-#ec-send-btn:hover { color: var(--accent-2); }
-#ec-send-btn:active { transform: scale(0.92); }
-#ec-send-btn svg { display: block; }
+#ec-send-btn:hover, .ec-send-btn:hover { color: var(--accent-2); }
+#ec-send-btn:active, .ec-send-btn:active { transform: scale(0.92); }
+#ec-send-btn svg, .ec-send-btn svg { display: block; }
+
+/* interrupt 버튼 — inputbar 안에서 send 자리 대체 */
+.ec-interrupt-btn { color: var(--danger) !important; }
 
 /* Slash autocomplete */
 .ec-autocomplete {
