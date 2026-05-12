@@ -8,8 +8,8 @@
   --r-lg: 14px;
   --r-xl: 20px;
 
-  --font: "Noto Sans","Noto Sans KR",-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",system-ui,sans-serif;
-  --mono: "Noto Sans Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font: 'Noto Sans KR', 'Noto Sans', -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", system-ui, sans-serif;
+  --mono: 'Noto Sans Mono', monospace;
 
   --ec-font-size: 14px;
   --nav-w: 220px;
@@ -143,7 +143,21 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 button { font-family: inherit; font-size: inherit; cursor: pointer; background: none; border: none; color: inherit; }
-input, textarea, select { font-family: inherit; font-size: inherit; color: inherit; }
+input, textarea, select {
+  font-family: inherit; font-size: inherit; color: inherit;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  outline: none;
+  padding: 6px 10px;
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent-3);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-3) 15%, transparent);
+}
+input[type=checkbox], input[type=radio] {
+  width: auto; padding: 0; background: none; border: 1px solid var(--border);
+}
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -163,7 +177,9 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 }
 .ec-nav-header {
   display: flex; align-items: center; gap: 8px;
-  padding: 14px 16px 12px;
+  padding: 0 16px;
+  height: 48px;           /* viewbar min-height와 동일 */
+  flex-shrink: 0;
   border-bottom: 1px solid var(--border);
 }
 .ec-logo-mark {
@@ -211,7 +227,27 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 .ec-tab.connected .ec-dot { background: var(--green); }
 .ec-tab.disconnected .ec-dot { background: var(--danger); }
 
-.ec-nav-footer { padding: 10px; border-top: 1px solid var(--border); }
+.ec-nav-footer { padding: 8px 10px; border-top: 1px solid var(--border); }
+/* 새 세션 탭 — 점선 박스, 탭 목록 맨 위 */
+.ec-new-session-tab {
+  display: flex; align-items: center; justify-content: center;
+  width: calc(100% - 20px);
+  margin: 8px 10px 4px;
+  padding: 7px 12px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  background: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  flex-shrink: 0;
+}
+.ec-new-session-tab:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--accent-3);
+}
 .ec-icon-btn {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 8px 12px;
@@ -229,25 +265,94 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
   flex: 1; min-width: 0;
   display: flex; flex-direction: column;
   background: var(--bg);
+  position: relative;
 }
+/* 맨 밑으로 버튼 */
+.ec-scroll-bottom {
+  position: absolute;
+  bottom: 108px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 14px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-family: var(--mono);
+  box-shadow: var(--shadow-2);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s, color 0.1s;
+  z-index: 10;
+}
+.ec-scroll-bottom:hover { background: var(--surface-2); color: var(--text); }
 
 .ec-viewbar {
-  display: flex; align-items: center; gap: 10px;
-  padding: 10px 16px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  padding: 6px 14px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
-  min-height: 44px;
+  min-height: 48px;
+  gap: 8px;
+}
+.ec-viewbar-left {
+  display: flex; align-items: center; gap: 4px;
+  justify-content: flex-start;
+}
+.ec-viewbar-center {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  min-width: 0;
+}
+.ec-viewbar-right {
+  display: flex; align-items: center; justify-content: flex-end;
+  min-width: 0;
+}
+.ec-viewbar-meta {
+  display: flex; align-items: center; gap: 4px;
 }
 .ec-active-label {
-  flex: 1;
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
   letter-spacing: -0.01em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 260px;
 }
-.ec-parse-status { font-size: 11.5px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+/* viewbar 전용 컨트롤 버튼 — border 없이, 작고 조용하게 */
+.ec-vb-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  background: none;
+  border: none;
+  color: var(--text-2);
+  font-size: 12px;
+  font-family: var(--mono);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.1s, color 0.1s;
+}
+.ec-vb-btn:hover { background: var(--surface-2); color: var(--text); }
+.ec-vb-btn:disabled { opacity: 0.45; cursor: default; }
+.ec-vb-btn.ec-perm-bypass { color: var(--danger); }
+/* viewbar meta 영역 (i 버튼) */
+.ec-vb-meta-btn {
+  display: inline-flex; align-items: center;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 0.1s;
+}
+.ec-vb-meta-btn:hover { color: var(--text-2); }
+.ec-parse-status { font-size: 11px; color: var(--muted); display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .ec-parse-status::before {
   content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
 }
@@ -262,9 +367,9 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
   -webkit-overflow-scrolling: touch;      /* iOS momentum scroll */
   touch-action: pan-y;                    /* 모바일 가로 스와이프 제스처와 분리 */
   padding: 18px 22px 20px;
-  display: flex; flex-direction: column; gap: 14px;
+  display: flex; flex-direction: column; gap: 10px;
   font-size: var(--ec-font-size);
-  line-height: 1.62;
+  line-height: 1.5;
   overscroll-behavior: contain;
 }
 
@@ -278,6 +383,13 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 
 .ec-turn { display: flex; flex-direction: column; gap: 6px; }
 .ec-turn-live .ec-turn-body { box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-3) 30%, transparent), var(--shadow-1); }
+
+/* human: 오른쪽 정렬 */
+.ec-turn.ec-turn-human { align-items: flex-end; }
+.ec-turn.ec-turn-human .ec-turn-body { max-width: 75%; }
+
+/* assistant: 왼쪽 전폭 */
+.ec-turn.ec-turn-assistant { align-items: flex-start; }
 
 .ec-live-divider {
   display: flex; align-items: center; gap: 10px;
@@ -307,17 +419,18 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 
 .ec-turn-body {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border-strong);
+  border: none;
   border-radius: var(--r-md);
   padding: 12px 16px;
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: break-word;
-  min-width: 0;                              /* flex child overflow 차단 */
-  overflow-x: hidden;
+  min-width: 0;
+  max-width: 100%;                           /* 부모 너비 초과 방지 */
+  overflow: hidden;
   box-shadow: var(--shadow-1);
 }
+.ec-turn { max-width: 100%; min-width: 0; }
 /* 마크다운 렌더링 시 내부 요소 */
 .ec-turn-body pre {
   background: var(--surface-2);
@@ -345,36 +458,36 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
   padding: 0;
   font-size: inherit;
 }
-.ec-turn-body p { margin: 0 0 8px; }
+.ec-turn-body p { margin: 0 0 4px; }
 .ec-turn-body p:last-child { margin-bottom: 0; }
-.ec-turn-body ul, .ec-turn-body ol { margin: 4px 0 8px; padding-left: 20px; }
-.ec-turn-body li { margin: 2px 0; }
-.ec-turn-body h1,.ec-turn-body h2,.ec-turn-body h3 { margin: 10px 0 4px; font-size: 1em; font-weight: 700; }
+.ec-turn-body ul, .ec-turn-body ol { margin: 2px 0 4px; padding-left: 18px; }
+.ec-turn-body li { margin: 1px 0; }
+.ec-turn-body h1,.ec-turn-body h2,.ec-turn-body h3 { margin: 8px 0 3px; font-size: 1em; font-weight: 700; }
 .ec-turn-body blockquote { border-left: 3px solid var(--border-strong); margin: 6px 0; padding: 4px 10px; color: var(--text-2); }
 .ec-turn-body table { border-collapse: collapse; width: 100%; margin: 8px 0; overflow-x: auto; display: block; }
 .ec-turn-body th, .ec-turn-body td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
 .ec-turn-body th { background: var(--surface-2); font-weight: 600; }
 
-/* turn 타입별 강조 (border-left + 색상) */
-.ec-turn-body.human       { border-left-color: var(--accent); background: linear-gradient(to right, color-mix(in srgb, var(--accent) 6%, var(--surface)) 0%, var(--surface) 100%); }
-.ec-turn-body.cmdline     { border-left-color: var(--muted); font-family: var(--mono); font-size: 12.5px; color: var(--text-2); }
-.ec-turn-body.assistant   { border-left-color: var(--green); }
-.ec-turn-body.tool_call   { border-left-color: var(--tool); font-family: var(--mono); font-size: 12.5px; }
-.ec-turn-body.tool_out    { border-left-color: var(--tool-out); font-family: var(--mono); font-size: 12.5px; color: var(--text-2); }
-.ec-turn-body.diff        { border-left-color: var(--diff); font-family: var(--mono); font-size: 12.5px; }
-.ec-turn-body.thinking    { border-left-color: var(--think); color: var(--text-2); font-style: italic; font-size: 13px; }
-.ec-turn-body.compacting  { border-left-color: var(--info); color: var(--info); font-style: italic; font-size: 13px; }
-.ec-turn-body.timing      { border-left-color: var(--muted); color: var(--muted); font-size: 11.5px; }
-.ec-turn-body.permission  { border-left-color: var(--danger); }
-.ec-turn-body.dialog      { border-left-color: var(--warn); }
-.ec-turn-body.config      { border-left-color: var(--info); font-family: var(--mono); font-size: 12.5px; }
-.ec-turn-body.session_eval{ border-left-color: var(--accent-3); }
-.ec-turn-body.todo_list   { border-left-color: var(--green); font-family: var(--mono); font-size: 13px; }
-.ec-turn-body.tip         { border-left-color: var(--info); color: var(--text-2); font-size: 12.5px; }
-.ec-turn-body.recap       { border-left-color: var(--warn); font-style: italic; }
-.ec-turn-body.mcp         { border-left-color: var(--info); font-family: var(--mono); font-size: 12.5px; }
-.ec-turn-body.status      { border-left-color: var(--muted); color: var(--muted); font-family: var(--mono); font-size: 11.5px; padding: 8px 14px; }
-.ec-turn-body.other       { border-left-color: var(--muted); color: var(--muted); font-family: var(--mono); font-size: 12px; }
+/* turn 타입별 배경색 (border-left 제거, 색으로만 구분) */
+.ec-turn-body.human       { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); }
+.ec-turn-body.assistant   { background: var(--surface-2); }
+.ec-turn-body.cmdline     { font-family: var(--mono); font-size: 12.5px; color: var(--text-2); }
+.ec-turn-body.tool_call   { background: color-mix(in srgb, var(--tool) 8%, var(--surface)); font-family: var(--mono); font-size: 12.5px; }
+.ec-turn-body.tool_out    { background: color-mix(in srgb, var(--tool-out) 6%, var(--surface)); font-family: var(--mono); font-size: 12.5px; color: var(--text-2); }
+.ec-turn-body.diff        { background: color-mix(in srgb, var(--diff) 6%, var(--surface)); font-family: var(--mono); font-size: 12.5px; }
+.ec-turn-body.thinking    { background: color-mix(in srgb, var(--think) 6%, var(--surface)); color: var(--text-2); font-style: italic; font-size: 13px; }
+.ec-turn-body.compacting  { color: var(--info); font-style: italic; font-size: 13px; }
+.ec-turn-body.timing      { color: var(--muted); font-size: 11.5px; }
+.ec-turn-body.permission  { background: color-mix(in srgb, var(--danger) 6%, var(--surface)); }
+.ec-turn-body.dialog      { background: color-mix(in srgb, var(--warn) 6%, var(--surface)); }
+.ec-turn-body.config      { font-family: var(--mono); font-size: 12.5px; }
+.ec-turn-body.session_eval{ }
+.ec-turn-body.todo_list   { font-family: var(--mono); font-size: 13px; }
+.ec-turn-body.tip         { color: var(--text-2); font-size: 12.5px; }
+.ec-turn-body.recap       { font-style: italic; }
+.ec-turn-body.mcp         { font-family: var(--mono); font-size: 12.5px; }
+.ec-turn-body.status      { color: var(--muted); font-family: var(--mono); font-size: 11.5px; padding: 8px 14px; }
+.ec-turn-body.other       { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 
 /* 비-발화 turn 접기 그룹 */
 .ec-turn-fold {
@@ -400,11 +513,26 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 .ec-turn-fold > summary { transition: color 0.1s; }
 .ec-turn-fold[open] { background: transparent; border-style: solid; }
 .ec-turn-fold > .ec-turn { margin-top: 4px; }
+/* details 안 turn들도 레이아웃 동일 적용 (human 우측, assistant 좌측) */
+.ec-turn-fold .ec-turn.ec-turn-human { align-items: flex-end; }
+.ec-turn-fold .ec-turn.ec-turn-human .ec-turn-body { max-width: 75%; }
+.ec-turn-fold .ec-turn.ec-turn-assistant { align-items: flex-start; }
+/* 접기 버튼 */
+.ec-fold-close-btn {
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px 0 2px;
+  user-select: none;
+  transition: color 0.15s;
+}
+.ec-fold-close-btn:hover { color: var(--text); }
 
 /* meta/channel turn 색상 */
-.ec-turn-body.channel     { border-left-color: #94e2d5; }
-.ec-turn-body.meta        { border-left-color: var(--muted); color: var(--text-2); font-family: var(--mono); font-size: 11.5px; }
-.ec-turn-body.hook        { border-left-color: var(--muted); color: var(--text-2); font-family: var(--mono); font-size: 11.5px; }
+.ec-turn-body.channel     { background: color-mix(in srgb, #94e2d5 8%, var(--surface)); }
+.ec-turn-body.meta        { color: var(--text-2); font-family: var(--mono); font-size: 11.5px; }
+.ec-turn-body.hook        { color: var(--text-2); font-family: var(--mono); font-size: 11.5px; }
 
 /* 숨김 안내 배너 (메타/훅 이벤트 카운트) */
 .ec-hidden-banner {
@@ -454,37 +582,12 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
   padding-bottom: var(--safe-bottom);
 }
 
-.ec-actionbar {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 12px 4px;
-  flex-wrap: wrap;
-}
-.ec-action-btn {
-  padding: 5px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
-  color: var(--text-2);
-  font-size: 12px;
-  flex-shrink: 0;
-  min-height: 30px;
-  transition: background 0.1s, color 0.1s, border-color 0.1s;
-}
-.ec-action-btn:hover { background: var(--surface-3); color: var(--text); }
-.ec-action-btn:active { background: var(--accent); color: var(--surface); border-color: var(--accent); }
-.ec-usage {
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+/* ec-actionbar 제거됨 */
+.ec-action-btn { display: none; } /* 레거시 참조 안전망 */
 
 .ec-inputbar {
   display: flex; align-items: stretch; gap: 6px;
-  padding: 8px 12px 12px;
+  padding: 12px 12px 12px;
   position: relative;
 }
 #ec-input {
@@ -509,21 +612,41 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
   border-color: var(--accent-3);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-3) 18%, transparent);
 }
-#ec-send-btn, .ec-send-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 10px;
-  background: transparent;
-  border: none;
-  color: var(--accent);
+/* 전송/인터럽트 묶음 */
+.ec-send-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   flex-shrink: 0;
   align-self: stretch;
-  cursor: pointer;
-  transition: color 0.12s, transform 0.05s;
+  justify-content: center;
 }
-#ec-send-btn:hover, .ec-send-btn:hover { color: var(--accent-2); }
-#ec-send-btn:active, .ec-send-btn:active { transform: scale(0.92); }
+/* 공통 정사각형 버튼 */
+.ec-sq-btn {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: none;
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s, box-shadow 0.1s;
+}
+.ec-sq-btn:hover { background: var(--surface-3); color: var(--text-2); }
+.ec-sq-btn:active { background: var(--surface-3); box-shadow: inset 0 1px 4px rgba(0,0,0,0.18); }
+/* send: 활성 */
+#ec-send-btn.ec-sq-btn { color: var(--accent); }
+#ec-send-btn.ec-sq-btn:hover { background: color-mix(in srgb, var(--accent) 10%, var(--surface-2)); color: var(--accent); }
+/* interrupt: claude 응답 중에만 활성화 */
+.ec-interrupt-btn { color: var(--muted); }
+.ec-interrupt-btn.ec-active { color: var(--danger); }
+.ec-interrupt-btn.ec-active:hover { background: color-mix(in srgb, var(--danger) 10%, var(--surface-2)); }
+.ec-interrupt-btn:disabled { opacity: 0.3; cursor: default; }
+/* legacy send-btn fallback */
 #ec-send-btn svg, .ec-send-btn svg { display: block; }
 
 /* interrupt 버튼 — inputbar 안에서 send 자리 대체 */
@@ -1064,6 +1187,24 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 .ec-tab:hover .ec-tab-menu, .ec-tab.active .ec-tab-menu { opacity: 1; }
 .ec-tab-menu:hover { background: var(--surface-3); color: var(--text); }
 
+.ec-tab-ctx {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  flex-shrink: 0;
+  line-height: 1;
+  transition: color 0.1s;
+  opacity: 0;
+}
+.ec-tab:hover .ec-tab-ctx,
+.ec-tab.active .ec-tab-ctx { opacity: 1; }
+.ec-tab-ctx:hover { color: var(--danger); }
+
+.ec-tab-dragging { opacity: 0.5; }
+.ec-tab-drag-over { background: var(--surface-2); outline: 1px dashed var(--accent-3); }
+
 .ec-tab-group-header {
   display: flex; align-items: center; gap: 6px;
   padding: 6px 10px 4px;
@@ -1108,6 +1249,31 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 }
 .ec-tab-popup button:hover { background: var(--surface-2); }
 
+/* ── Model 선택 팝업 ─────────────────────────────────────────────────────── */
+.ec-model-popup {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-pop);
+  padding: 4px;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+}
+.ec-model-popup-item {
+  text-align: left;
+  padding: 7px 12px;
+  font-size: 12.5px;
+  color: var(--text);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  border: none;
+  font-family: inherit;
+  transition: background 0.1s;
+}
+.ec-model-popup-item:hover { background: var(--surface-2); }
+
 /* ── Optimistic pending message ──────────────────────────────────────────── */
 .ec-turn-pending .ec-turn-body {
   opacity: 0.55;
@@ -1122,26 +1288,31 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
   font-style: italic;
 }
 
-/* ── Permission pill in viewbar ───────────────────────────────────────────── */
-.ec-perm-pill {
-  padding: 4px 10px;
-  font-size: 11.5px;
-  font-family: var(--mono);
-  border: 1px solid var(--border);
-  border-radius: 999px;
+/* ── 응답 대기 타이핑 인디케이터 ─────────────────────────────────────────── */
+.ec-thinking-dots {
+  display: flex; align-items: center; gap: 4px;
+  padding: 10px 14px;
+  min-height: 36px;
   background: var(--surface-2);
-  color: var(--text-2);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background 0.1s, color 0.1s, border-color 0.1s;
 }
-.ec-perm-pill:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
-.ec-perm-pill:disabled { cursor: not-allowed; opacity: 0.6; }
-.ec-perm-pill.ec-perm-bypass {
-  color: var(--danger);
-  border-color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+.ec-thinking-dots span {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: ec-thinking 1.4s ease-in-out infinite;
+  display: inline-block;
 }
+.ec-thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.ec-thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes ec-thinking {
+  0%, 60%, 100% { opacity: 0.2; transform: scale(0.8); }
+  30% { opacity: 1; transform: scale(1); }
+}
+
+/* ── Permission pill — now uses .ec-vb-btn; keep class for JS compat ─────── */
+.ec-perm-pill { /* merged into .ec-vb-btn */ }
+.ec-perm-pill:disabled { cursor: not-allowed; opacity: 0.45; }
+.ec-perm-pill.ec-perm-bypass { color: var(--danger); }
 
 /* ── Info panel sections ──────────────────────────────────────────────────── */
 .ec-info-section {
@@ -1215,18 +1386,16 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 /* ── Welcome (no active session) ──────────────────────────────────────────── */
 .ec-welcome-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin: 10px 0 14px; }
 
-/* viewbar에 표시되는 작은 usage / context 인디케이터 */
+/* viewbar 우측 usage/ctx */
 .ec-viewbar-usage {
-  font-size: 11.5px;
-  color: var(--text-2);
+  font-size: 11px;
+  color: var(--muted);
   font-family: var(--mono);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-left: 10px;
-  margin-right: auto;
-  max-width: 50%;
   cursor: help;
+  text-align: right;
 }
 @media (max-width: 640px) {
   .ec-viewbar-usage { display: none; }
@@ -1512,6 +1681,17 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
   transition: background 0.1s, color 0.1s, border-color 0.1s;
 }
 .ec-history-btn:hover { background: var(--surface-3); color: var(--text); border-color: var(--border-strong); }
+
+/* ── 설명적 텍스트 (metadata, labels, statusline, usage, timestamps) — mono ── */
+.ec-parse-status,
+.ec-viewbar-usage,
+.ec-usage,
+.ec-turn-label,
+.ec-tab-label,
+.ec-home-session-label,
+.ec-home-session-cwd {
+  font-family: var(--mono);
+}
 
 /* Mobile: dialog panels — slash/jsonl 도 full-screen 처리 */
 @media (max-width: 720px) {

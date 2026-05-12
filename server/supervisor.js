@@ -105,6 +105,11 @@ const server = net.createServer(conn => {
       let msg;
       try { msg = JSON.parse(line); } catch { continue; }
       if (msg.op === 'input' && typeof msg.data === 'string') {
+        // 임시 stdin 로그 — hex dump로 실제 전송 데이터 확인용
+        const hex = Buffer.from(msg.data).toString('hex');
+        if (hex.length <= 64) {  // 짧은 입력만 (escape sequence 확인용)
+          console.log(`[supervisor:${SID}:stdin] hex=${hex} str=${JSON.stringify(msg.data)}`);
+        }
         try { proc.stdin.write(msg.data); } catch {}
       } else if (msg.op === 'kill') {
         try { proc.kill(msg.signal || 'SIGTERM'); } catch {}

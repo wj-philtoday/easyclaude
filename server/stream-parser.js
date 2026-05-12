@@ -61,6 +61,7 @@ class StreamParser {
       cwd: null,
       tools: [],
       usage: { input: 0, output: 0, cache_creation: 0, cache_read: 0 },
+      lastCtxInput: 0,   // 마지막 turn의 input_tokens (ctx% 계산용)
       contextWindow: null,
     };
     this.lastResult = null;
@@ -272,6 +273,9 @@ class StreamParser {
     s.output += u.output_tokens || 0;
     s.cache_creation += u.cache_creation_input_tokens || 0;
     s.cache_read += u.cache_read_input_tokens || 0;
+    // 마지막 turn의 실제 ctx 사용량 (누적이 아닌 단일 turn)
+    const rawCtx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0);
+    if (rawCtx > 0) this.session.lastCtxInput = rawCtx;
     this.h.onUsage && this.h.onUsage(this.session.usage);
   }
 

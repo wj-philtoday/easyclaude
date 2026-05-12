@@ -4,7 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>easyclaude</title>
-<link rel="stylesheet" href="style.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600&family=Noto+Sans+KR:wght@400;500;600&family=Noto+Sans+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css?v=1778573827">
 </head>
 <body class="ec-body">
 <div id="ec-shell">
@@ -16,47 +19,55 @@
       <span id="ec-title" class="ec-title">easyclaude</span>
       <button id="ec-ham" class="ec-icon-btn" aria-label="사이드바 토글">☰</button>
     </div>
+    <button id="ec-new-session-btn" class="ec-new-session-tab">＋ 새 세션</button>
     <div id="ec-tabs" class="ec-tabs"></div>
     <div class="ec-nav-footer">
-      <button id="ec-new-session-btn" class="ec-icon-btn ec-full">＋ 새 세션</button>
-      <button id="ec-settings-btn" class="ec-icon-btn ec-full">⚙ 설정</button>
+      <button id="ec-settings-btn" class="ec-icon-btn ec-full">설정</button>
     </div>
   </nav>
 
   <!-- 메인 -->
   <main id="ec-main" class="ec-main">
     <div id="ec-viewbar" class="ec-viewbar">
-      <span id="ec-active-label" class="ec-active-label"></span>
-      <button id="ec-restart-btn" class="ec-icon-btn ec-hidden" title="세션 재기동" aria-label="세션 재기동" style="font-size:13px;padding:4px 8px">↻ 재기동</button>
-      <span id="ec-viewbar-usage" class="ec-viewbar-usage" title="모델 · 누적 토큰 · MCP 상태"></span>
-      <button id="ec-perm-pill" class="ec-perm-pill" title="권한 모드" aria-label="권한 모드">🔒</button>
-      <button id="ec-info-btn" class="ec-icon-btn" title="세션 정보" aria-label="세션 정보">ⓘ</button>
-      <span id="ec-status" class="ec-parse-status">connecting…</span>
+      <div class="ec-viewbar-left">
+        <button id="ec-restart-btn" class="ec-vb-btn ec-hidden" title="세션 재기동 (재기동)" aria-label="세션 재기동">↻</button>
+        <button id="ec-perm-pill" class="ec-vb-btn" title="권한 모드 (재기동 필요)" aria-label="권한 모드"></button>
+        <button id="ec-perm-toggle-btn" class="ec-vb-btn ec-hidden" title="Shift+Tab inject — 권한 모드 순환 시도" aria-label="권한 전환">⇄</button>
+        <button id="ec-model-toggle-btn" class="ec-vb-btn ec-hidden" title="Alt+P inject — 모델 변경 시도" aria-label="모델 변경">M</button>
+      </div>
+      <div class="ec-viewbar-center">
+        <span id="ec-active-label" class="ec-active-label"></span>
+        <div class="ec-viewbar-meta">
+          <span id="ec-status" class="ec-parse-status">connecting…</span>
+          <button id="ec-info-btn" class="ec-vb-meta-btn" title="세션 정보" aria-label="세션 정보">ⓘ</button>
+        </div>
+      </div>
+      <div class="ec-viewbar-right">
+        <span id="ec-viewbar-usage" class="ec-viewbar-usage"></span>
+      </div>
     </div>
     <div id="ec-parsed-view" class="ec-parsed-view"></div>
+    <button id="ec-scroll-bottom" class="ec-scroll-bottom ec-hidden" aria-label="맨 아래로">↓ 맨 아래로</button>
 
     <!-- 하단 컨트롤 -->
     <div id="ec-bottom" class="ec-bottom">
-      <div id="ec-actionbar" class="ec-actionbar">
-        <!-- 에이전트 응답 중일 때만 노출 -->
-        <button id="ec-interrupt-btn" class="ec-action-btn ec-hidden"
-                title="응답 중단 (Interrupt)" aria-label="응답 중단" style="color:var(--danger)">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="margin-right:4px">
-            <rect x="5" y="5" width="14" height="14" rx="2"/>
-          </svg>인터럽트
-        </button>
-        <span id="ec-usage" class="ec-usage"></span>
-      </div>
       <div id="ec-inputbar" class="ec-inputbar">
         <div id="ec-autocomplete" class="ec-autocomplete ec-hidden"></div>
         <textarea id="ec-input" autocomplete="off" autocorrect="off"
                autocapitalize="none" spellcheck="false" rows="2"
                placeholder="메시지 입력… (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
-        <button id="ec-send-btn" title="전송" aria-label="전송">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M5 12h14M13 5l7 7-7 7"/>
-          </svg>
-        </button>
+        <div class="ec-send-group">
+          <button id="ec-interrupt-btn" class="ec-sq-btn ec-interrupt-btn" title="응답 중단" aria-label="응답 중단" disabled>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <rect x="4" y="4" width="16" height="16" rx="3"/>
+            </svg>
+          </button>
+          <button id="ec-send-btn" class="ec-sq-btn" title="전송" aria-label="전송">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M5 12h14M13 5l7 7-7 7"/>
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
   </main>
@@ -202,10 +213,22 @@
           <summary>프리셋</summary>
           <div class="ec-preset-buttons">
             <button type="button" data-preset="bypass">권한 우회</button>
-            <button type="button" data-preset="prompt">권한 확인 (easypermitter)</button>
+            <button type="button" data-preset="plan">Plan 모드</button>
+            <button type="button" data-preset="dontask">묻지 않음</button>
+            <button type="button" data-preset="acceptedits">편집 허용</button>
+            <button type="button" data-preset="prompt">권한 확인 (permitter)</button>
+            <button type="button" data-preset="opus">Opus</button>
             <button type="button" data-preset="opus1m">Opus 1M</button>
+            <button type="button" data-preset="sonnet">Sonnet</button>
             <button type="button" data-preset="sonnet1m">Sonnet 1M</button>
+            <button type="button" data-preset="haiku">Haiku</button>
           </div>
+          <div class="ec-preset-custom" style="margin-top:8px;display:flex;gap:6px">
+            <input id="ns-custom-preset-name" type="text" placeholder="이름" style="width:80px">
+            <input id="ns-custom-preset-val" type="text" placeholder="플래그 (예: --model haiku)" style="flex:1">
+            <button type="button" id="ns-custom-preset-add" class="ec-btn">추가</button>
+          </div>
+          <div id="ns-custom-presets" class="ec-preset-buttons" style="margin-top:6px"></div>
         </details>
       </div>
 
@@ -235,9 +258,14 @@
           <summary>프리셋</summary>
           <div class="ec-preset-buttons">
             <button type="button" data-preset="bypass" data-target="rs-args">권한 우회</button>
+            <button type="button" data-preset="plan" data-target="rs-args">Plan 모드</button>
+            <button type="button" data-preset="dontask" data-target="rs-args">묻지 않음</button>
             <button type="button" data-preset="prompt" data-target="rs-args">권한 확인</button>
+            <button type="button" data-preset="opus" data-target="rs-args">Opus</button>
             <button type="button" data-preset="opus1m" data-target="rs-args">Opus 1M</button>
+            <button type="button" data-preset="sonnet" data-target="rs-args">Sonnet</button>
             <button type="button" data-preset="sonnet1m" data-target="rs-args">Sonnet 1M</button>
+            <button type="button" data-preset="haiku" data-target="rs-args">Haiku</button>
           </div>
         </details>
       </div>
@@ -293,6 +321,17 @@
         <label class="ec-field">
           <span>타이틀 텍스트 (override, 비우면 프리셋 기본값)</span>
           <input id="cfg-title-text" type="text" placeholder="비우면 기본값">
+        </label>
+        <label class="ec-field">
+          <span>사용자 이름 (대화창 표시명)</span>
+          <input id="cfg-username" type="text" placeholder="사용자">
+        </label>
+        <label class="ec-field">
+          <span>언어 / Language</span>
+          <select id="cfg-locale">
+            <option value="ko">한국어</option>
+            <option value="en">English</option>
+          </select>
         </label>
       </section>
 
@@ -566,6 +605,6 @@ window.MathJax = {
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
 
-<script src="app.js?v=20260512y"></script>
+<script src="app.js?v=1778573676"></script>
 </body>
 </html>

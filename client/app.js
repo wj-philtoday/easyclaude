@@ -1,6 +1,61 @@
 'use strict';
 // easyclaude 클라이언트 — stream-json turn 수신 + 텍스트 송신 + dialog modal.
 
+// ── 로케일 ─────────────────────────────────────────────────────────────────
+const LOCALES = {
+  ko: {
+    new_session: '＋ 새 세션',
+    settings: '설정',
+    pinned_header: '고정',
+    unnamed_header: '미분류',
+    tab_rename: '이름 변경',
+    tab_pin: '상단 고정',
+    tab_unpin: '고정 해제',
+    tab_group_add: '그룹 설정…',
+    tab_group_remove: '그룹에서 제거',
+    tab_hide: '숨기기',
+    tab_restart: '재기동',
+    tab_delete: '삭제',
+    tab_unpin_btn: '해제',
+    tab_ungroup_btn: '제거',
+    user_default: '사용자',
+    colors: ['파란','빨간','초록','노란','보라','주황','하늘','분홍','회색','갈색','검은','하얀'],
+    animals: ['고양이','강아지','여우','토끼','곰','늑대','사슴','수달','판다','코끼리','기린','하마','독수리','부엉이','펭귄','돌고래','상어','호랑이','사자','치타'],
+    session_name: (c, a) => `${c}색 ${a}`,
+  },
+  en: {
+    new_session: '＋ New Session',
+    settings: 'Settings',
+    pinned_header: 'Pinned',
+    unnamed_header: 'Unclassified',
+    tab_rename: 'Rename',
+    tab_pin: 'Pin to Top',
+    tab_unpin: 'Unpin',
+    tab_group_add: 'Set Group…',
+    tab_group_remove: 'Remove from Group',
+    tab_hide: 'Hide',
+    tab_restart: 'Restart',
+    tab_delete: 'Delete',
+    tab_unpin_btn: 'Unpin',
+    tab_ungroup_btn: 'Ungroup',
+    user_default: 'User',
+    colors: ['Blue','Red','Green','Yellow','Purple','Orange','Sky','Pink','Gray','Brown','Black','White'],
+    animals: ['Cat','Dog','Fox','Rabbit','Bear','Wolf','Deer','Otter','Panda','Elephant','Giraffe','Hippo','Eagle','Owl','Penguin','Dolphin','Shark','Tiger','Lion','Cheetah'],
+    session_name: (c, a) => `${c} ${a}`,
+  },
+};
+function T(key) {
+  const locale = (cfg && cfg.locale) || 'ko';
+  return (LOCALES[locale] || LOCALES.ko)[key] || key;
+}
+function genSessionName() {
+  const locale = (cfg && cfg.locale) || 'ko';
+  const L = LOCALES[locale] || LOCALES.ko;
+  const c = L.colors[Math.floor(Math.random() * L.colors.length)];
+  const a = L.animals[Math.floor(Math.random() * L.animals.length)];
+  return L.session_name(c, a);
+}
+
 const $ = id => document.getElementById(id);
 const $tabs = $('ec-tabs');
 const $parsed = $('ec-parsed-view');
@@ -48,6 +103,8 @@ const cfg = Object.assign({
   customLogoSvg: '',          // 커스텀 로고 SVG 원문
   customThemeMode: 'light',   // custom 테마 다크 여부 (light가 디폴트)
   bypassEnabled: false,       // bypassPermissions 옵션 허용 여부 (위험 모드)
+  userName: '',               // 대화창 사용자 표시명
+  locale: 'ko',               // 언어: ko | en
 }, (() => { try { return JSON.parse(localStorage.getItem(CFG_KEY) || '{}'); } catch { return {}; } })());
 
 function saveCfg() { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); applyCfg(); }
@@ -129,6 +186,10 @@ function syncSettingsForm() {
   set('cfg-title-text',   cfg.titleText);
   set('cfg-custom-svg',   cfg.customLogoSvg);
   set('cfg-custom-mode',  cfg.customThemeMode);
+  const unEl = $('cfg-username');
+  if (unEl) unEl.value = cfg.userName || '';
+  const localeEl = $('cfg-locale');
+  if (localeEl) localeEl.value = cfg.locale || 'ko';
   const bypassEl = $('cfg-bypass-enabled');
   if (bypassEl) bypassEl.checked = !!cfg.bypassEnabled;
   const rdMd = $('cfg-render-md');
@@ -154,11 +215,11 @@ function renderPermPill() {
   let mode = ctrl.permissionMode;
   if (ctrl.permissionPromptTool) mode = 'prompt-tool';
   pill.style.display = '';
-  const icons = {
-    default: '🔒', acceptEdits: '✏️', auto: '🤖',
-    bypassPermissions: '🔓', dontAsk: '🤫', plan: '📋', 'prompt-tool': '🤝',
+  const labels = {
+    default: '기본', acceptEdits: '편집', auto: '자동',
+    bypassPermissions: '우회', dontAsk: '무묻', plan: '계획', 'prompt-tool': '프롬프트',
   };
-  pill.textContent = `${icons[mode] || '🔒'} ${mode}`;
+  pill.textContent = labels[mode] || mode;
   pill.dataset.mode = mode;
   pill.title = cfg.bypassEnabled
     ? '클릭: bypassPermissions ↔ default 토글 (재기동)'
@@ -289,6 +350,8 @@ function onMsg(msg) {
     // 설정 패널이 열려있으면 hidden 섹션도 재렌더
     if (!$settings.classList.contains('ec-hidden')) renderHiddenSessions();
     renderTabs();
+    // 홈 화면(activeSid 없음)이면 최근 세션 목록 갱신
+    if (!activeSid) renderHome();
     // reconnect 후 이전 활성 세션 자동 복귀
     if (pendingReopenSid && ecSessions.some(s => s.id === pendingReopenSid)) {
       const sidToReopen = pendingReopenSid;
@@ -363,7 +426,11 @@ function onMsg(msg) {
     return;
   }
   if (op === 'usage') {
-    if (ch) ch.usage = msg.usage;
+    if (ch) {
+      ch.usage = msg.usage;
+      // lastCtxInput은 system op에서 session 통해 오지만 usage 타이밍에 직접 저장
+      if (msg.lastCtxInput !== undefined && ch.session) ch.session.lastCtxInput = msg.lastCtxInput;
+    }
     if (ch && ch.sessionId === activeSid) renderUsage();
     return;
   }
@@ -400,12 +467,19 @@ function onMsg(msg) {
   if (op === 'rate_limit') {
     if (ch) {
       const info = msg.info || {};
-      ch.stalled = {
-        kind: 'rate_limit',
-        resetAt: info.resets_at_unix || info.resets_at || null,
-        message: info.message || info.text || 'Claude rate limit',
-      };
-      if (ch.sessionId === activeSid) renderActive();
+      // rate_limit_event는 "경고성"일 수 있음 — resets_at이 있거나 실제 차단 메시지가 있을 때만 stalled
+      // type이 'pause' 또는 명시적 limit 초과 신호일 때만 처리
+      const isHardLimit = info.type === 'pause' || info.type === 'rate_limit' ||
+        (typeof (info.message || info.text || '') === 'string' &&
+         /rate limit|usage limit|quota exceeded|too many requests/i.test(info.message || info.text || ''));
+      if (isHardLimit) {
+        ch.stalled = {
+          kind: 'rate_limit',
+          resetAt: info.resets_at_unix || info.resets_at || null,
+          message: info.message || info.text || 'Claude rate limit',
+        };
+        if (ch.sessionId === activeSid) renderActive();
+      }
     }
     return;
   }
@@ -495,7 +569,7 @@ function renderTabs() {
   const pinned = sorted.filter(s => tabPrefs[s.id]?.pinned);
   const rest = sorted.filter(s => !tabPrefs[s.id]?.pinned);
   if (pinned.length) {
-    appendTabSection('📌 고정', pinned, '__pinned__');
+    appendTabSection(T('pinned_header'), pinned, '__pinned__');
   }
   // group별로 묶기
   const groups = new Map();
@@ -507,11 +581,21 @@ function renderTabs() {
   // 그룹 있는 것 먼저, 빈 그룹은 마지막
   const groupNames = [...groups.keys()].filter(g => g);
   for (const g of groupNames) {
-    appendTabSection(g, groups.get(g), g);
+    // 그룹 내 항목 정렬 (groupOrder 기준)
+    const groupItems = [...groups.get(g)].sort((a, b) =>
+      (tabPrefs[a.id]?.groupOrder || 0) - (tabPrefs[b.id]?.groupOrder || 0)
+    );
+    appendTabSection(g, groupItems, g);
   }
   const ungrouped = groups.get('') || [];
   if (ungrouped.length) {
-    appendTabSection(pinned.length || groupNames.length ? '기타' : null, ungrouped, '__ungrouped__');
+    // 미분류 세션: 최근 활성화순 (tabPrefs.lastActive 기준, 없으면 세션 ID 역순)
+    const ungroupedSorted = [...ungrouped].sort((a, b) => {
+      const ta = tabPrefs[a.id]?.lastActive || a.id;
+      const tb = tabPrefs[b.id]?.lastActive || b.id;
+      return tb.localeCompare(ta);
+    });
+    appendTabSection(pinned.length || groupNames.length ? T('unnamed_header') : null, ungroupedSorted, '__ungrouped__');
   }
   refreshTabState();
 }
@@ -532,8 +616,57 @@ function appendTabSection(headerLabel, items, groupKey) {
     $tabs.appendChild(header);
     if (isCollapsed) return;
   }
+
+  // 핀 또는 그룹 섹션이면 드래그 활성화
+  const isDraggable = groupKey === '__pinned__' || (groupKey !== '__ungrouped__' && groupKey);
+
   for (const s of items) {
-    $tabs.appendChild(createTabElement(s));
+    const el = createTabElement(s);
+    if (isDraggable) {
+      el.draggable = true;
+      el.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('text/plain', s.id);
+        e.dataTransfer.effectAllowed = 'move';
+        el.classList.add('ec-tab-dragging');
+      });
+      el.addEventListener('dragend', () => {
+        el.classList.remove('ec-tab-dragging');
+        document.querySelectorAll('.ec-tab-drag-over').forEach(t => t.classList.remove('ec-tab-drag-over'));
+      });
+      el.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        el.classList.add('ec-tab-drag-over');
+      });
+      el.addEventListener('dragleave', () => {
+        el.classList.remove('ec-tab-drag-over');
+      });
+      el.addEventListener('drop', (e) => {
+        e.preventDefault();
+        el.classList.remove('ec-tab-drag-over');
+        const fromId = e.dataTransfer.getData('text/plain');
+        const toId = s.id;
+        if (fromId === toId) return;
+        if (groupKey === '__pinned__') {
+          // pinOrder 교환
+          const fromOrder = tabPrefs[fromId]?.pinOrder || 0;
+          const toOrder = tabPrefs[toId]?.pinOrder || 0;
+          tabPrefs[fromId] = { ...(tabPrefs[fromId] || {}), pinOrder: toOrder };
+          tabPrefs[toId] = { ...(tabPrefs[toId] || {}), pinOrder: fromOrder };
+          saveTabPrefs();
+          renderTabs();
+        } else {
+          // 그룹 내 순서: groupOrder 교환
+          const fromOrder = tabPrefs[fromId]?.groupOrder || 0;
+          const toOrder = tabPrefs[toId]?.groupOrder || 0;
+          tabPrefs[fromId] = { ...(tabPrefs[fromId] || {}), groupOrder: toOrder };
+          tabPrefs[toId] = { ...(tabPrefs[toId] || {}), groupOrder: fromOrder };
+          saveTabPrefs();
+          renderTabs();
+        }
+      });
+    }
+    $tabs.appendChild(el);
   }
 }
 
@@ -559,16 +692,27 @@ function createTabElement(s) {
   btn.className = 'ec-tab';
   btn.dataset.sid = s.id;
   const pref = tabPrefs[s.id] || {};
-  const pinIcon = pref.pinned ? '📌' : '';
+  // x 버튼: 맥락에 따라 동작이 다름
+  // 핀 → 고정 해제, 그룹 → 그룹에서 제거, 미분류 → 숨기기
+  const ctxTitle = pref.pinned ? T('tab_unpin') : pref.group ? T('tab_group_remove') : T('tab_hide');
+  const ctxAct   = pref.pinned ? 'unpin' : pref.group ? 'ungroup' : 'hide';
+  const contextBtn = `<span class="ec-tab-ctx" data-ctx="${ctxAct}" title="${esc(ctxTitle)}">✕</span>`;
   btn.innerHTML = `<span class="ec-dot"></span>` +
-    (pinIcon ? `<span class="ec-tab-pin">${pinIcon}</span>` : '') +
     `<span class="ec-tab-label">${esc(effectiveLabel(s))}</span>` +
-    `<span class="ec-tab-menu" title="옵션">⋮</span>` +
-    `<span class="ec-tab-x" title="${s.meta?.adhoc ? '제거 (jsonl 보존)' : '보관 (숨기기)'}">✕</span>`;
+    contextBtn +
+    `<span class="ec-tab-menu" title="옵션">⋮</span>`;
   btn.addEventListener('click', e => {
-    if (e.target.classList.contains('ec-tab-x')) {
+    if (e.target.classList.contains('ec-tab-ctx')) {
       e.stopPropagation();
-      return handleTabClose(s);
+      const ctx = e.target.dataset.ctx;
+      if (ctx === 'unpin') {
+        setTabPref(s.id, { pinned: false, pinOrder: null });
+      } else if (ctx === 'ungroup') {
+        setTabPref(s.id, { group: null });
+      } else if (ctx === 'hide') {
+        handleTabClose(s);
+      }
+      return;
     }
     if (e.target.classList.contains('ec-tab-menu')) {
       e.stopPropagation();
@@ -600,16 +744,13 @@ function showTabMenu(s, anchor) {
   menu.style.top  = top + 'px';
   menu.style.maxWidth = (vw - 16) + 'px';
   menu.innerHTML = `
-    <button data-act="rename">✎ 이름 변경…</button>
-    <button data-act="pin">${pref.pinned ? '📌 고정 해제' : '📌 고정'}</button>
-    ${pref.pinned ? `<button data-act="pin-up">▲ 위로</button>
-                     <button data-act="pin-down">▼ 아래로</button>` : ''}
-    <button data-act="group">📂 그룹 설정…</button>
-    <button data-act="restart">↻ 재기동</button>
+    <button data-act="rename" style="color:var(--text-2)">${T('tab_rename')}</button>
+    <button data-act="pin" style="color:var(--text-2)">${pref.pinned ? T('tab_unpin') : T('tab_pin')}</button>
+    <button data-act="group" style="color:var(--text-2)">${pref.group ? T('tab_group_remove') : T('tab_group_add')}</button>
+    <button data-act="hide" style="color:var(--text-2)">${T('tab_hide')}</button>
     <hr style="border:0;border-top:1px solid var(--border);margin:4px 0">
-    ${isAdhoc ? `<button data-act="delete">🗑 삭제</button>` : ''}
-    <button data-act="purge" style="color:var(--danger,#c0392b)">⚠ 영구 삭제 (purge)</button>
-    <button data-act="hidden-panel">👁 숨김 해제는 별도 화면에서</button>
+    <button data-act="restart" style="color:var(--text-2)">${T('tab_restart')}</button>
+    ${isAdhoc ? `<button data-act="delete" style="color:var(--text-2)">${T('tab_delete')}</button>` : ''}
   `;
   document.body.appendChild(menu);
   const close = () => menu.remove();
@@ -628,25 +769,16 @@ function showTabMenu(s, anchor) {
         patch.pinOrder = null;
       }
       setTabPref(s.id, patch);
-    } else if (act === 'pin-up' || act === 'pin-down') {
-      // pinned 탭들의 순서 교환
-      const pinned = ecSessions
-        .filter(x => tabPrefs[x.id]?.pinned)
-        .sort((a, b) => (tabPrefs[a.id].pinOrder || 0) - (tabPrefs[b.id].pinOrder || 0));
-      const idx = pinned.findIndex(x => x.id === s.id);
-      const target = act === 'pin-up' ? idx - 1 : idx + 1;
-      if (target < 0 || target >= pinned.length) { close(); return; }
-      const otherSid = pinned[target].id;
-      const a = tabPrefs[s.id].pinOrder;
-      tabPrefs[s.id].pinOrder = tabPrefs[otherSid].pinOrder;
-      tabPrefs[otherSid].pinOrder = a;
-      saveTabPrefs();
-      renderTabs();
     } else if (act === 'group') {
-      const cur = pref.group || '';
-      const ans = prompt('그룹 이름 (비우면 그룹 해제):', cur);
-      if (ans === null) { close(); return; }
-      setTabPref(s.id, { group: ans.trim() || null });
+      if (pref.group) {
+        setTabPref(s.id, { group: null });
+      } else {
+        const ans = prompt('그룹 이름:', '');
+        if (ans === null) { close(); return; }
+        setTabPref(s.id, { group: ans.trim() || null });
+      }
+    } else if (act === 'hide') {
+      handleTabClose(s);
     } else if (act === 'rename') {
       const cur = effectiveLabel(s);
       const ans = prompt('세션 이름 (비우면 기본값으로 복원):', cur);
@@ -658,17 +790,6 @@ function showTabMenu(s, anchor) {
       if (ch) sendWs({ op:'restart', id: ch.id });
     } else if (act === 'delete') {
       handleTabDelete(s);
-    } else if (act === 'purge') {
-      handleTabPurge(s);
-    } else if (act === 'hidden-panel') {
-      // 설정 패널 열고 숨김 섹션으로 스크롤
-      $settings.classList.remove('ec-hidden');
-      renderHomesList();
-      renderHiddenSessions();
-      setTimeout(() => {
-        const sec = $('ec-hidden-sessions-section');
-        if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 50);
     }
     close();
   });
@@ -758,9 +879,12 @@ function refreshTabState() {
   document.querySelectorAll('.ec-tab').forEach(t => {
     const sid = t.dataset.sid;
     const ch = channels.get(sid);
+    const sess = ecSessions.find(s => s.id === sid);
+    // WS channel이 없어도 서버 sessions broadcast의 alive 정보 활용
+    const alive = !!(ch && ch.alive) || !!(sess && sess.alive);
     t.classList.toggle('active', sid === activeSid);
-    t.classList.toggle('connected', !!(ch && ch.alive));
-    t.classList.toggle('disconnected', !!(ch && !ch.alive));
+    t.classList.toggle('connected', alive);
+    t.classList.toggle('disconnected', !!(ch && !ch.alive) && !alive);
   });
   updateInputBar();
 }
@@ -772,9 +896,14 @@ function updateInputBar() {
   const ch = activeChannel();
   const alive = !!(ch && ch.alive);
   const hasSession = !!activeSid;
-  $interrupt?.classList.toggle('ec-hidden', !alive);
-  // send는 항상 표시 (never hidden)
+  // interrupt: 항상 보이되 claude 응답 중에만 활성화
+  if ($interrupt) {
+    $interrupt.disabled = !alive;
+    $interrupt.classList.toggle('ec-active', alive);
+  }
   $restart?.classList.toggle('ec-hidden', !hasSession);
+  $('ec-perm-toggle-btn')?.classList.toggle('ec-hidden', !hasSession);
+  $('ec-model-toggle-btn')?.classList.toggle('ec-hidden', !hasSession);
 }
 
 function activate(sessionId) {
@@ -885,6 +1014,7 @@ function ecRenderBody(text, forceMarkdown) {
     .replace(/\\\([\s\S]+?\\\)/g, m => protect(m));
   let html;
   try { html = marked.parse(t); } catch { html = esc(t).replace(/\n/g,'<br>'); }
+  html = html.replace(/<p>\s*<\/p>/g, '').trimEnd();  // 마지막 빈 단락 제거
   if (typeof DOMPurify !== 'undefined') html = DOMPurify.sanitize(html);
   html = html.replace(/\x02MATH(\d+)\x03/g, (_, i) => esc(holders[+i]));
   return html;
@@ -1138,7 +1268,7 @@ function renderHome() {
     } else {
       $rl.innerHTML = recents.map(s => {
         const ch = channels.get(s.id);
-        const alive = ch && ch.alive;
+        const alive = (ch && ch.alive) || !!s.alive;
         return `<button type="button" class="ec-home-session" data-sid="${esc(s.id)}">
           <span class="ec-home-session-dot" style="background:${alive ? 'var(--green)' : 'var(--muted)'}"></span>
           <span class="ec-home-session-label">${esc(s.label || s.id)}</span>
@@ -1188,7 +1318,17 @@ function renderActive() {
   const SPOKEN_TURN_TYPES = new Set(['human', 'assistant', 'channel']);
   const renderOneTurn = (t) => {
     const cls = `ec-turn ec-turn-${t.type}` + (t.is_error ? ' ec-error' : '');
-    const labelText = (t.type === 'meta' && t.eventType) ? `${LABELS.meta} · ${t.eventType}` : (LABELS[t.type] || t.type);
+    let labelText;
+    if (t.type === 'human') {
+      labelText = cfg.userName || T('user_default');
+    } else if (t.type === 'assistant') {
+      const sess = ecSessions.find(s => s.id === activeSid);
+      labelText = sess ? effectiveLabel(sess) : 'Claude';
+    } else if (t.type === 'meta' && t.eventType) {
+      labelText = `${LABELS.meta} · ${t.eventType}`;
+    } else {
+      labelText = LABELS[t.type] || t.type;
+    }
     // assistant/human/channel은 마크다운 렌더링 대상; 나머지는 코드/원문 그대로
     const RENDERABLE = new Set(['human','assistant','channel','thinking']);
     const bodyHtml = RENDERABLE.has(t.type) ? ecRenderBody(t.body || '') : `<pre style="margin:0;white-space:pre-wrap;word-break:break-word">${esc(t.body||'')}</pre>`;
@@ -1204,7 +1344,7 @@ function renderActive() {
     const summary = Object.entries(counts).map(([k,v]) => `${LABELS[k]||k}${v>1?' ×'+v:''}`).join(' · ');
     const inner = foldBuf.map(renderOneTurn).join('');
     foldBuf = [];
-    return `<details class="ec-turn-fold"><summary>▸ ${esc(summary)} <span class="ec-muted">(${n})</span></summary>${inner}</details>`;
+    return `<details class="ec-turn-fold"><summary>▸ ${esc(summary)} <span class="ec-muted">(${n})</span></summary>${inner}<div class="ec-fold-close-btn">▲ 접기</div></details>`;
   };
   for (const t of visible) {
     if (SPOKEN_TURN_TYPES.has(t.type)) {
@@ -1215,21 +1355,51 @@ function renderActive() {
     }
   }
   turnsHtml += flushFold();
+  // pending: 서버 echo 전까지 즉시 표시 (optimistic). 일반 유저 버블과 동일 스타일.
   const pendingHtml = pending.map(p => `
-    <div class="ec-turn ec-turn-human ec-turn-pending">
-      <div class="ec-turn-label" style="color:${COLORS.human}">You · 전송 중…</div>
+    <div class="ec-turn ec-turn-human">
+      <div class="ec-turn-label" style="color:${COLORS.human}">${esc(cfg.userName || T('user_default'))}</div>
       <div class="ec-turn-body human">${esc(p.text)}</div>
     </div>`).join('');
   // 인증/리밋 등 fallback banner
   const stalled = ch.stalled || null;
   const stalledHtml = stalled ? renderStalledBanner(stalled) : '';
-  $parsed.innerHTML = hiddenBanner + turnsHtml + pendingHtml + stalledHtml;
+  // 응답 대기 인디케이터: alive이고 마지막 visible turn이 human/channel이면 claude가 생각중
+  const allForWait = [...visible, ...pending.map(p => ({ type: 'human' }))];
+  const lastT = allForWait[allForWait.length - 1];
+  const isWaiting = !stalled && ch.alive && lastT && (lastT.type === 'human' || lastT.type === 'channel');
+  const sess = ecSessions.find(s => s.id === ch.sessionId);
+  const sessLabel = sess ? effectiveLabel(sess) : 'Claude';
+  const waitingHtml = isWaiting ? `
+    <div class="ec-turn ec-turn-assistant">
+      <div class="ec-turn-label" style="color:${COLORS.assistant||'var(--green)'}">${esc(sessLabel)}</div>
+      <div class="ec-turn-body ec-thinking-dots">
+        <span></span><span></span><span></span>
+      </div>
+    </div>` : '';
+  // 저장: render 직전 열려있는 details 인덱스
+  const openDetailIndices = new Set();
+  $parsed.querySelectorAll('details').forEach((el, i) => { if (el.open) openDetailIndices.add(i); });
+
+  $parsed.innerHTML = hiddenBanner + turnsHtml + pendingHtml + waitingHtml + stalledHtml;
   $('ec-show-debug')?.addEventListener('click', e => {
     e.preventDefault();
     setShowDebugEvents(true);
     renderActive();
   });
   wireStalledBanner(ch);
+
+  // 복원: render 직후 열렸던 details 복원
+  $parsed.querySelectorAll('details').forEach((el, i) => { if (openDetailIndices.has(i)) el.open = true; });
+
+  // details 닫기: "▲ 접기" 버튼 + details 자체 배경 클릭
+  $parsed.querySelectorAll('details.ec-turn-fold').forEach(el => {
+    el.querySelector('.ec-fold-close-btn')?.addEventListener('click', () => { el.open = false; });
+    el.addEventListener('click', e => {
+      if (e.target === el) el.open = false;
+    });
+  });
+
   if (wasAtBottom) $parsed.scrollTop = $parsed.scrollHeight;
   ecTypeset($parsed);
 }
@@ -1323,7 +1493,7 @@ function fmtTok(n) {
 function renderUsage() {
   const ch = activeChannel();
   const setBoth = (text, title) => {
-    if ($usage) { $usage.textContent = text; if (title) $usage.title = title; }
+    // $usage (actionbar)는 제거됨 — viewbar right에만 표시
     if ($viewbarUsage) { $viewbarUsage.textContent = text; if (title) $viewbarUsage.title = title; }
   };
   if (!ch) { setBoth('', ''); return; }
@@ -1341,8 +1511,14 @@ function renderUsage() {
   }
   if (!u) { setBoth(model + mcp, ''); return; }
   const total = (u.input || 0) + (u.output || 0) + (u.cache_read || 0);
-  const text = `${model} · ${fmtTok(total)} tok${mcp}`;
-  const title = `model: ${model}\nin: ${fmtNum(u.input)} / out: ${fmtNum(u.output)}\ncache_read: ${fmtNum(u.cache_read)} / cache_create: ${fmtNum(u.cache_creation)}\ntotal: ${fmtNum(total)}\n${(s.mcpServers||[]).map(m=>`${m.name}: ${m.status}`).join('\n')}`;
+  // ctx: 현재 컨텍스트 사용 토큰 (input + cache_read 누적)
+  // ctx: 마지막 turn의 실제 input (누적 아님) — stream-parser의 lastCtxInput
+  const ctxTok = s.lastCtxInput || 0;
+  const maxCtx = /\[1m\]/i.test(model) ? 1048576 : 200000;
+  const remainPct = ctxTok > 0 ? Math.max(0, Math.round((maxCtx - ctxTok) / maxCtx * 100)) : null;
+  const ctxStr = remainPct !== null ? ` · ctx ${remainPct}%` : '';
+  const text = `${fmtTok(total)} tok${ctxStr}${mcp}`;
+  const title = `model: ${model}\nin: ${fmtNum(u.input)} / out: ${fmtNum(u.output)}\ncache_read: ${fmtNum(u.cache_read)} / cache_create: ${fmtNum(u.cache_creation)}\ntotal: ${fmtNum(total)} / ctx used: ${fmtNum(ctxTok)} / ctx remain: ${remainPct ?? '?'}%\n${(s.mcpServers||[]).map(m=>`${m.name}: ${m.status}`).join('\n')}`;
   setBoth(text, title);
 }
 
@@ -1385,15 +1561,62 @@ function autosize() {
 $send.addEventListener('click', sendInput);
 $interrupt?.addEventListener('click', () => {
   const ch = activeChannel();
-  if (!ch) return;
+  if (!ch || !ch.alive) return;
   sendWs({ op: 'interrupt', id: ch.id });
 });
+$('ec-perm-toggle-btn')?.addEventListener('click', () => {
+  const ch = activeChannel();
+  if (!ch) return;
+  sendWs({ op: 'perm_toggle', id: ch.id });
+});
+$('ec-model-toggle-btn')?.addEventListener('click', (e) => {
+  const ch = activeChannel();
+  if (!ch) return;
+  // 기존 팝업 닫기
+  document.querySelectorAll('.ec-model-popup').forEach(el => el.remove());
+  const MODELS = [
+    { label: 'Opus 4.7',       value: 'opus' },
+    { label: 'Opus 4.7 (1M)',  value: 'claude-opus-4-7' },
+    { label: 'Sonnet 4.6',     value: 'sonnet' },
+    { label: 'Sonnet 4.6 (1M)',value: 'claude-sonnet-4-6[1M]' },
+    { label: 'Haiku 4.5',      value: 'haiku' },
+  ];
+  const popup = document.createElement('div');
+  popup.className = 'ec-model-popup';
+  popup.innerHTML = MODELS.map(m =>
+    `<button class="ec-model-popup-item" data-model="${esc(m.value)}">${esc(m.label)}</button>`
+  ).join('');
+  // 버튼 기준으로 위치
+  const btn = e.currentTarget;
+  const rect = btn.getBoundingClientRect();
+  popup.style.cssText = `position:fixed;top:${rect.bottom+4}px;left:${rect.left}px;z-index:300;`;
+  document.body.appendChild(popup);
+  popup.querySelectorAll('.ec-model-popup-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const model = item.dataset.model;
+      sendWs({ op: 'model_toggle', id: ch.id, model });
+      popup.remove();
+    });
+  });
+  // 외부 클릭 시 닫기
+  const close = (ev) => { if (!popup.contains(ev.target) && ev.target !== btn) { popup.remove(); document.removeEventListener('click', close, true); } };
+  setTimeout(() => document.addEventListener('click', close, true), 0);
+});
 // 대화창 위 스크롤 → history 더 로드 (in-place 무한 스크롤)
+const $scrollBottom = $('ec-scroll-bottom');
 $parsed?.addEventListener('scroll', () => {
   if ($parsed.scrollTop < 80) {
     const ch = activeChannel();
     if (ch) loadMoreHistory(ch);
   }
+  // 맨밑 버튼: 스크롤이 바닥에서 200px 이상 위에 있으면 표시
+  if ($scrollBottom) {
+    const atBottom = $parsed.scrollTop + $parsed.clientHeight + 200 >= $parsed.scrollHeight;
+    $scrollBottom.classList.toggle('ec-hidden', atBottom);
+  }
+});
+$scrollBottom?.addEventListener('click', () => {
+  $parsed.scrollTo({ top: $parsed.scrollHeight, behavior: 'smooth' });
 });
 // Escape 키: 입력칸이 비어있을 때만 인터럽트로 (포커스 있는 곳 텍스트 입력 중이면 무시)
 window.addEventListener('keydown', (e) => {
@@ -1582,9 +1805,13 @@ $dialogClose.addEventListener('click', () => $dialogCancel.click());
 //   kind:'claude' — 실제로 claude에게 전송되어 동작하는 것
 //   kind:'ec'     — ec 자체 API(/api/slash/*)로 인터셉트, 결과를 모달에 표시
 const SLASH_CMDS = [
-  // claude-native (stream-json 모드에서도 동작)
+  // claude-native (stream-json stdin에 user text로 inject — claude가 slash command로 처리)
   { cmd: '/clear',    desc: '대화 초기화',                   kind: 'claude' },
   { cmd: '/compact',  desc: '대화 압축',                     kind: 'claude' },
+  { cmd: '/model',    desc: '모델 변경 (예: /model sonnet)',  kind: 'claude' },
+  { cmd: '/memory',   desc: '메모리 보기/편집',              kind: 'claude' },
+  { cmd: '/review',   desc: 'PR 리뷰',                      kind: 'claude' },
+  { cmd: '/help',     desc: '도움말',                        kind: 'claude' },
   // ec-handled (API 호출 + 모달 표시)
   { cmd: '/status',   desc: '세션 상태 (model/cwd/tools/mcp)', kind: 'ec' },
   { cmd: '/usage',    desc: '토큰 사용량 + 비용',              kind: 'ec' },
@@ -1677,6 +1904,8 @@ $ham?.addEventListener('click', () => $nav.classList.toggle('open'));
 $settingsBtn?.addEventListener('click', () => $settings.classList.remove('ec-hidden'));
 $settingsClose?.addEventListener('click', () => $settings.classList.add('ec-hidden'));
 $('cfg-fontsize')?.addEventListener('input', e => { cfg.fontSize = +e.target.value; saveCfg(); });
+$('cfg-username')?.addEventListener('input', e => { cfg.userName = e.target.value; saveCfg(); });
+$('cfg-locale')?.addEventListener('change', e => { cfg.locale = e.target.value; saveCfg(); renderTabs(); });
 $('cfg-theme')?.addEventListener('change', e => { cfg.theme = e.target.value; saveCfg(); });
 $('cfg-theme-preset')?.addEventListener('change', e => { cfg.themePreset = e.target.value; saveCfg(); });
 $('cfg-logo-preset')?.addEventListener('change', e => { cfg.logoPreset = e.target.value; saveCfg(); });
@@ -2783,28 +3012,83 @@ function tokenizeArgs(str) {
   return out;
 }
 
+// genSessionName() — 상단 LOCALES 블록에서 정의됨 (로케일 대응 버전)
+
 const PRESETS = {
-  // 서버가 --permission-prompt-tool 보이면 mcp-config 자동 주입.
-  bypass:   ['--permission-mode', 'bypassPermissions'],
-  prompt:   ['--permission-prompt-tool', 'mcp__easypermitter__permission_prompt'],
-  opus1m:   ['--model', 'opus[1m]'],
-  sonnet1m: ['--model', 'sonnet[1m]'],
+  bypass:        ['--permission-mode', 'bypassPermissions'],
+  plan:          ['--permission-mode', 'plan'],
+  dontask:       ['--permission-mode', 'dontAsk'],
+  acceptedits:   ['--permission-mode', 'acceptEdits'],
+  prompt:        ['--permission-prompt-tool', 'mcp__easypermitter__permission_prompt'],
+  opus:          ['--model', 'opus'],
+  opus1m:        ['--model', 'opus[1m]'],
+  sonnet:        ['--model', 'sonnet'],
+  sonnet1m:      ['--model', 'sonnet[1m]'],
+  haiku:         ['--model', 'haiku'],
+  thinking:      ['--thinking', '--budget-tokens', '10000'],
+  verbose:       ['--verbose'],
+  nocache:       ['--no-cache'],
 };
+// 사용자 커스텀 프리셋 (localStorage)
+function loadCustomPresets() {
+  try { return JSON.parse(localStorage.getItem('ec-custom-presets') || '{}'); } catch { return {}; }
+}
+function saveCustomPresets(obj) {
+  localStorage.setItem('ec-custom-presets', JSON.stringify(obj));
+}
 
 $newSessionBtn?.addEventListener('click', showNewSessionModal);
 $newSessionClose?.addEventListener('click', hideNewSessionModal);
 $newSessionCancel?.addEventListener('click', hideNewSessionModal);
+function applyPresetToTarget(args, targetId) {
+  const $target = $(targetId);
+  if (!$target) return;
+  const cur = $target.value.trim();
+  $target.value = (cur ? cur + ' ' : '') + args.map(a => a.includes(' ') || a.includes('"') ? JSON.stringify(a) : a).join(' ');
+}
+function renderCustomPresets() {
+  const $c = $('ns-custom-presets');
+  if (!$c) return;
+  const customs = loadCustomPresets();
+  $c.innerHTML = Object.entries(customs).map(([name]) =>
+    `<button type="button" class="ec-custom-preset-btn" data-name="${esc(name)}">${esc(name)} <span style="color:var(--danger);margin-left:4px">✕</span></button>`
+  ).join('');
+  $c.querySelectorAll('.ec-custom-preset-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      if (e.target.tagName === 'SPAN') {
+        const customs = loadCustomPresets();
+        delete customs[btn.dataset.name];
+        saveCustomPresets(customs);
+        renderCustomPresets();
+      } else {
+        const customs = loadCustomPresets();
+        const val = customs[btn.dataset.name];
+        if (val) applyPresetToTarget(tokenizeArgs(val), 'ns-args');
+      }
+    });
+  });
+}
 $newSession.querySelectorAll('[data-preset]').forEach(btn => {
   btn.addEventListener('click', () => {
-    const preset = PRESETS[btn.dataset.preset];
+    const allPresets = { ...PRESETS, ...loadCustomPresets() };
+    const preset = allPresets[btn.dataset.preset];
     if (!preset) return;
-    const targetId = btn.dataset.target || 'ns-args';
-    const $target = $(targetId);
-    if (!$target) return;
-    const cur = $target.value.trim();
-    $target.value = (cur ? cur + ' ' : '') + preset.map(a => a.includes(' ') || a.includes('"') ? JSON.stringify(a) : a).join(' ');
+    const args = Array.isArray(preset) ? preset : tokenizeArgs(preset);
+    applyPresetToTarget(args, btn.dataset.target || 'ns-args');
   });
 });
+$('ns-custom-preset-add')?.addEventListener('click', () => {
+  const name = $('ns-custom-preset-name')?.value.trim();
+  const val = $('ns-custom-preset-val')?.value.trim();
+  if (!name || !val) return;
+  const customs = loadCustomPresets();
+  customs[name] = val;
+  saveCustomPresets(customs);
+  if ($('ns-custom-preset-name')) $('ns-custom-preset-name').value = '';
+  if ($('ns-custom-preset-val')) $('ns-custom-preset-val').value = '';
+  renderCustomPresets();
+});
+renderCustomPresets();
 $newSessionCreate?.addEventListener('click', () => {
   if (nsActiveTab === 'resume') {
     if (!nsResumeSelected) { alert('세션을 선택하세요'); return; }
@@ -2820,12 +3104,11 @@ $newSessionCreate?.addEventListener('click', () => {
     hideNewSessionModal();
     return;
   }
-  const label = $nsLabel.value.trim();
+  const label = $nsLabel.value.trim() || genSessionName();
   const cwd = $nsCwd.value.trim();
   const name = $nsName.value.trim() || null;
   const args = tokenizeArgs($nsArgs.value);
   const home = $('ns-home').value || null;
-  if (!label) { $nsLabel.focus(); return; }
   if (!cwd)   { $nsCwd.focus();   return; }
   sendWs({ op: 'create_session', id: nextClientId++, label, cwd, name, args, home });
   hideNewSessionModal();

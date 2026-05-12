@@ -9,8 +9,22 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
+const os = require('os');
 const { StreamParser } = require('./stream-parser');
 const { startWatcher: startInboxWatcher, eventToChannelText, detectAgentIdentity } = require('./inbox-watcher');
+
+// ── HOME sanity check ────────────────────────────────────────────────────────
+// ec server는 항상 real HOME에서 실행되어야 한다 (overlay HOME에서 실행되면
+// state.json/config가 nested 경로에 잘못 생김). 호출자가 ec child라 HOME이
+// overlay 경로로 상속된 경우를 fix-up. /etc/passwd의 HOME을 신뢰.
+(function fixupHomeIfOverlay() {
+  const real = os.userInfo().homedir;
+  const cur = process.env.HOME;
+  if (real && cur && cur !== real && cur.includes('/easyclaude/overlay')) {
+    console.warn(`[easyclaude] HOME=${cur} looks like overlay; fixing to ${real}`);
+    process.env.HOME = real;
+  }
+})();
 
 // ── auth process tracking (login OAuth 플로우 상태) ─────────────────────────
 const authProcs = new Map(); // home → { proc, url, status, output, error, exitCode }
@@ -37,6 +51,20 @@ function saveEcToken(home, token) {
 function getEcToken(home) {
   const m = loadEcTokens();
   return m[home] || null;
+}
+function deleteEcToken(home) {
+  const p = _ecTokensPath();
+  const m = loadEcTokens();
+  if (!(home in m)) return;
+  delete m[home];
+  try { fs.writeFileSync(p, JSON.stringify(m, null, 2), { mode: 0o600 }); }
+  catch (e) { console.error(`[easyclaude] delete ec token fail: ${e.message}`); }
+}
+function hasCredentialsJson(home) {
+  try {
+    const p = path.join(home, '.claude', '.credentials.json');
+    return fs.existsSync(p);
+  } catch { return false; }
 }
 const OAUTH_TOKEN_RE = /\bsk-ant-oat\d+-[A-Za-z0-9_-]{30,}/;
 
@@ -433,7 +461,19 @@ function effectiveArgs(sess) {
 }
 
 function serializeForClient(s) {
-  return { id: s.id, label: s.label, args: effectiveArgs(s), cwd: s.cwd, home: s.home, meta: s.meta };
+  const ch = ptyChannels.get(s.id);
+  let alive = !!(ch && ch.proc && ch.proc.exitCode === null);
+  if (!alive) {
+    // ptyChannels에 없어도 supervisor가 살아있으면 alive로 표시
+    const supBaseDir = path.join(XDG_DATA_HOME, 'easyclaude', 'sup');
+    const safeId = s.id.replace(/[^A-Za-z0-9_.-]/g, '_');
+    const pidPath = path.join(supBaseDir, `${safeId}.pid`);
+    try {
+      const pid = parseInt(fs.readFileSync(pidPath, 'utf8').trim(), 10);
+      if (pid > 0) { try { process.kill(pid, 0); alive = true; } catch {} }
+    } catch {}
+  }
+  return { id: s.id, label: s.label, args: effectiveArgs(s), cwd: s.cwd, home: s.home, meta: s.meta, alive };
 }
 
 function broadcastSessions() {
@@ -1210,8 +1250,11 @@ const server = http.createServer((req, res) => {
     const home = u.searchParams.get('home') || process.env.HOME;
     const { spawnSync } = require('child_process');
     const env = { ...process.env, HOME: home };
+    // credentials.json이 없을 때만 ec native token 주입 (있으면 claude가 직접 사용)
     const ecToken = getEcToken(home);
-    if (ecToken && !env.CLAUDE_CODE_OAUTH_TOKEN) env.CLAUDE_CODE_OAUTH_TOKEN = ecToken;
+    if (ecToken && !env.CLAUDE_CODE_OAUTH_TOKEN && !hasCredentialsJson(home)) {
+      env.CLAUDE_CODE_OAUTH_TOKEN = ecToken;
+    }
     const result = spawnSync('claude', ['auth', 'status', '--json'], {
       env, timeout: 10000, encoding: 'utf8',
     });
@@ -1332,6 +1375,7 @@ const server = http.createServer((req, res) => {
         try { existing.proc.kill('SIGTERM'); } catch {}
       }
       authProcs.delete(home);
+      deleteEcToken(home);
       res.writeHead(200, {'Content-Type':'application/json'});
       return res.end(JSON.stringify({ ok: r.status === 0, stdout: r.stdout, stderr: r.stderr, home }));
     });
@@ -1969,7 +2013,8 @@ function spawnSession(sess) {
       onTurn: (turn) => {
         ch.scheduleTurns();
         // 현재 spawn의 parser가 만든 turn에서만 stalled 감지 — client-side 재감지 없음
-        if (turn.type === 'assistant' || turn.type === 'result') {
+        // assistant 타입은 제외: 응답 본문에 "rate limit" 등 단어가 포함되면 오탐 발생
+        if (turn.type === 'result') {
           const b = typeof turn.body === 'string' ? turn.body : '';
           if (/not logged in|please run \/login|please log in|invalid api key|api key not found/i.test(b)) {
             ch.broadcast({ op: 'stalled', kind: 'auth', message: b.slice(0, 400) });
@@ -1980,14 +2025,18 @@ function spawnSession(sess) {
       },
       onTurnUpdate: () => ch.scheduleTurns(),
       onSystem: (session) => ch.broadcast({ op: 'system', session }),
-      onUsage:  (usage)   => ch.broadcast({ op: 'usage', usage }),
+      onUsage:  (usage)   => ch.broadcast({ op: 'usage', usage, lastCtxInput: ch.parser.snapshot().session.lastCtxInput }),
       onResult: (result, usage) => ch.broadcast({ op: 'result', result, usage }),
       onAskUserQuestion: ({ tool_use_id, input }) => {
         ch.pendingDialogs.set(tool_use_id, { input });
         ch.broadcast({ op: 'dialog', kind: 'AskUserQuestion', tool_use_id, input });
       },
       onHook: (evt) => ch.broadcast({ op: 'hook', event: evt }),
-      onRateLimit: (info) => ch.broadcast({ op: 'rate_limit', info }),
+      onRateLimit: (info) => {
+        // 실제 내용 로깅 — 어떤 상황에서 rate_limit_event가 오는지 파악용
+        console.log(`[easyclaude:rate_limit_event] ${ch.sess.id}:`, JSON.stringify(info));
+        ch.broadcast({ op: 'rate_limit', info });
+      },
     });
   }
 
@@ -2014,6 +2063,9 @@ function spawnSession(sess) {
       ...defaultClaudeEnv(),
       ...(injectedEnv || {}),
     };
+    // ec 서버가 상속받은 claude 세션 관련 환경변수를 자식에 오염시키지 않도록 제거
+    delete childEnv.CLAUDE_CODE_SESSION_ID;
+    delete childEnv.CLAUDE_CODE_ENTRYPOINT;
     // sess.home 명시 override가 최우선. 그 외엔 ec 자체 overlay HOME 사용 (기본 ON).
     // cfg.overlay.enabled === false 로 명시한 경우에만 real HOME 사용.
     const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
@@ -2028,9 +2080,9 @@ function spawnSession(sess) {
         console.error(`[easyclaude] overlay setup fail: ${e.message}`);
       }
     }
-    // ec native OAuth token 자동 주입 (setup-token으로 받은 게 있으면)
+    // ec native OAuth token 자동 주입 (setup-token으로 받은 게 있고 credentials.json 없을 때만)
     const ecToken = getEcToken(childEnv.HOME);
-    if (ecToken && !childEnv.CLAUDE_CODE_OAUTH_TOKEN) {
+    if (ecToken && !childEnv.CLAUDE_CODE_OAUTH_TOKEN && !hasCredentialsJson(childEnv.HOME)) {
       childEnv.CLAUDE_CODE_OAUTH_TOKEN = ecToken;
     }
 
@@ -2475,6 +2527,50 @@ wss.on('connection', ws => {
       return;
     }
 
+    if (op === 'perm_toggle') {
+      // sdk-cli에서 slash command 미지원 → args 수정 후 재기동
+      const att = wsChannels.get(id);
+      if (!att) return;
+      const ch = ptyChannels.get(att.sessionId);
+      const sess = sessions().find(s => s.id === att.sessionId);
+      if (!sess) return send({ op: 'error', id, message: 'session not found' });
+      const PERM_ORDER = ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan'];
+      const snap = ch ? ch.parser.snapshot() : null;
+      const cur = snap?.session?.permissionMode || 'default';
+      const next = PERM_ORDER[(PERM_ORDER.indexOf(cur) + 1) % PERM_ORDER.length];
+      const newArgs = patchArgs(sess.args || [], { permissionMode: next });
+      sessionState[att.sessionId] = sessionState[att.sessionId] || {};
+      sessionState[att.sessionId].argsOverride = newArgs;
+      saveState(sessionState);
+      if (ch && ch.proc) { try { ch.proc.kill(); } catch {} ch.proc = null; ch.alive = false; }
+      const nch = spawnSession(sessions().find(s => s.id === att.sessionId));
+      if (nch && !nch.subscribers.has(ws)) nch.subscribers.set(ws, new Set());
+      if (nch) nch.subscribers.get(ws).add(id);
+      broadcastSessions();
+      return send({ op: 'restarted', id, from: cur, to: next });
+    }
+
+    if (op === 'model_toggle') {
+      // sdk-cli에서 /model 미지원 → args 수정 후 재기동
+      const att = wsChannels.get(id);
+      if (!att) return;
+      const ch = ptyChannels.get(att.sessionId);
+      const sess = sessions().find(s => s.id === att.sessionId);
+      if (!sess) return send({ op: 'error', id, message: 'session not found' });
+      const model = msg.model || '';
+      if (!model) return send({ op: 'error', id, message: 'model required' });
+      const newArgs = patchArgs(sess.args || [], { model });
+      sessionState[att.sessionId] = sessionState[att.sessionId] || {};
+      sessionState[att.sessionId].argsOverride = newArgs;
+      saveState(sessionState);
+      if (ch && ch.proc) { try { ch.proc.kill(); } catch {} ch.proc = null; ch.alive = false; }
+      const nch = spawnSession(sessions().find(s => s.id === att.sessionId));
+      if (nch && !nch.subscribers.has(ws)) nch.subscribers.set(ws, new Set());
+      if (nch) nch.subscribers.get(ws).add(id);
+      broadcastSessions();
+      return send({ op: 'restarted', id, model });
+    }
+
     if (op === 'interrupt') {
       // claude TUI의 ESC (현재 turn 중단) 상응. stream-json control_request 발사.
       // 출처: 비공식이나 reverse-engineering으로 확인된 control_request 프로토콜.
@@ -2501,12 +2597,19 @@ wss.on('connection', ws => {
 
     if (op === 'dialog_response') {
       // AskUserQuestion 답변 송신
-      const att = wsChannels.get(id);
-      if (!att) return;
-      const ch = ptyChannels.get(att.sessionId);
-      if (!ch) return;
+      // wsChannels(현 WS 연결) 우선 시도, 실패 시 tool_use_id로 전체 ptyChannels 검색
+      // → WS 재연결 후에도 기존 dialog에 응답 가능
       const { tool_use_id, answers, cancelled } = msg;
-      if (!ch.pendingDialogs.has(tool_use_id)) {
+      let ch = null;
+      const att = wsChannels.get(id);
+      if (att) ch = ptyChannels.get(att.sessionId);
+      if (!ch || !ch.pendingDialogs.has(tool_use_id)) {
+        // fallback: tool_use_id로 전체 채널 검색
+        for (const c of ptyChannels.values()) {
+          if (c.pendingDialogs.has(tool_use_id)) { ch = c; break; }
+        }
+      }
+      if (!ch || !ch.pendingDialogs.has(tool_use_id)) {
         return send({ op: 'error', id, message: `unknown tool_use_id: ${tool_use_id}` });
       }
       ch.pendingDialogs.delete(tool_use_id);
