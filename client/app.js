@@ -1856,10 +1856,29 @@ $('lg-copy')?.addEventListener('click', () => {
   const url = $('lg-url').value;
   if (url) navigator.clipboard?.writeText(url);
 });
-$('lg-submit-code')?.addEventListener('click', async () => {
+// 콜백 URL 전체를 paste한 경우 code 파라미터만 추출.
+// 우선순위: ?code=...&state=... 형식 → code+#state 결합 (claude code의 OAuth 콜백 형식)
+function extractAuthCode(raw) {
+  if (!raw) return '';
+  const s = String(raw).trim();
+  if (!/^https?:\/\//i.test(s)) return s; // URL 아니면 그대로
+  try {
+    const u = new URL(s);
+    const code = u.searchParams.get('code');
+    const state = u.searchParams.get('state');
+    if (code && state) return `${code}#${state}`;
+    if (code) return code;
+  } catch {}
+  return s;
+}
+
+$('lg-submit-code')?.addEventListener('click', async (e) => {
+  e?.preventDefault?.();
+  e?.stopPropagation?.();
   const home = $('ec-login').dataset.home;
-  const code = ($('lg-code').value || '').trim();
-  if (!code) { $('lg-message').textContent = '코드를 입력하세요'; return; }
+  const raw  = ($('lg-code').value || '').trim();
+  if (!raw) { $('lg-message').textContent = '코드 또는 콜백 URL을 입력하세요'; return; }
+  const code = extractAuthCode(raw);
   $('lg-message').textContent = '';
   $('lg-status').textContent = '⏳ 코드 제출 중…';
   $('lg-submit-code').disabled = true;
@@ -1877,14 +1896,14 @@ $('lg-submit-code')?.addEventListener('click', async () => {
     }
     $('lg-status').textContent = '✅ 코드 전송됨 — 인증 진행 대기 중';
     $('lg-code').value = '';
-  } catch (e) {
+  } catch (err) {
     $('lg-submit-code').disabled = false;
-    $('lg-message').textContent = '오류: ' + e.message;
+    $('lg-message').textContent = '오류: ' + err.message;
   }
 });
 // 코드 입력란에서 Enter로도 제출
 $('lg-code')?.addEventListener('keydown', e => {
-  if (e.key === 'Enter') { e.preventDefault(); $('lg-submit-code')?.click(); }
+  if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); $('lg-submit-code')?.click(); }
 });
 
 async function doLogout(home) {

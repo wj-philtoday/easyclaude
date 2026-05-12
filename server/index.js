@@ -840,7 +840,7 @@ const server = http.createServer((req, res) => {
         return res.end(JSON.stringify({ error: 'no active auth process for this home — start login/setup-token first' }));
       }
       try {
-        state.proc.stdin.write(code.trim() + '\r');
+        state.proc.stdin.write(code.trim() + '\n');
         res.writeHead(200, {'Content-Type':'application/json'});
         return res.end(JSON.stringify({ ok: true, hint: '폴링으로 status 확인' }));
       } catch (e) {
