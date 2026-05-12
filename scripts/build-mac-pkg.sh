@@ -109,11 +109,9 @@ pkgbuild \
   --install-location "/" \
   "$COMPONENT_PKG"
 
-# 최종 pkg (distribution)
-PKG_OUT="$DIST/easyclaude-mac-v${VERSION}.pkg"
-echo "[build-mac-pkg] productbuild..."
-productbuild \
-  --distribution <(cat <<DIST_XML
+# distribution XML — 임시 파일로 작성 (process substitution은 macOS productbuild에서 /dev/fd 권한 오류 발생)
+DIST_XML="$TMP/distribution.xml"
+cat > "$DIST_XML" <<DIST_XML_EOF
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="1">
   <title>easyclaude v${VERSION}</title>
@@ -131,8 +129,13 @@ productbuild \
   </choice>
   <pkg-ref id="kr.philtoday.easyclaude" version="${VERSION}" onConclusion="none">easyclaude-component.pkg</pkg-ref>
 </installer-gui-script>
-DIST_XML
-  ) \
+DIST_XML_EOF
+
+# 최종 pkg (distribution)
+PKG_OUT="$DIST/easyclaude-mac-v${VERSION}.pkg"
+echo "[build-mac-pkg] productbuild..."
+productbuild \
+  --distribution "$DIST_XML" \
   --resources "$RESOURCES" \
   --package-path "$TMP" \
   "$PKG_OUT"
