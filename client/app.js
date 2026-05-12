@@ -339,8 +339,7 @@ function onMsg(msg) {
     if (!ch) return;
     ch.turns = msg.turns || [];
     ch.usage = msg.usage || ch.usage;
-    // 응답 재개 시 stalled 해제 (dismissed 포함 — 새 대화 시작)
-    if ((ch.stalled || ch.stalled?.dismissed) && ch.turns.length) ch.stalled = null;
+    if (ch.stalled && ch.turns.length) ch.stalled = null;  // 응답 재개 시 stalled/dismissed 해제
     // pendingInputs 중 서버 turns에 매칭되는 항목 제거 (echo 도착)
     if (ch.pendingInputs?.length) {
       ch.pendingInputs = ch.pendingInputs.filter(p =>
@@ -404,6 +403,14 @@ function onMsg(msg) {
         resetAt: info.resets_at_unix || info.resets_at || null,
         message: info.message || info.text || 'Claude rate limit',
       };
+      if (ch.sessionId === activeSid) renderActive();
+    }
+    return;
+  }
+  // server-side parser(현재 spawn만)가 감지한 stalled 이벤트
+  if (op === 'stalled') {
+    if (ch && !ch.stalled?.dismissed) {
+      ch.stalled = { kind: msg.kind, message: msg.message || '' };
       if (ch.sessionId === activeSid) renderActive();
     }
     return;
@@ -1148,26 +1155,8 @@ function renderActive() {
     return;
   }
   const allTurns = [...(ch.histTurns || []), ...(ch.turns || [])];
-  // Auth/리밋 stalled 감지 — live turns(ch.turns)의 최근 30개만 검사.
-  // ch.stalled.dismissed 가 true면 사용자가 배너를 닫은 것 → 재감지 안 함.
-  if (!ch.stalled || ch.stalled.dismissed === true) {
-    if (!ch.stalled) {  // dismissed 상태가 아닐 때만 새로 감지
-      const liveTurns = ch.turns || [];
-      for (let i = liveTurns.length - 1; i >= Math.max(0, liveTurns.length - 30); i--) {
-        const t = liveTurns[i];
-        const b = typeof t?.body === 'string' ? t.body : '';
-        if (!b) continue;
-        if (/not logged in|please run \/login|please log in|run \/login|invalid api key|api key not found/i.test(b)) {
-          ch.stalled = { kind: 'auth', message: b.slice(0, 400) };
-          break;
-        }
-        if (/rate limit|usage limit reached|quota exceeded|too many requests/i.test(b)) {
-          ch.stalled = { kind: 'rate_limit', message: b.slice(0, 400) };
-          break;
-        }
-      }
-    }
-  }
+  // stalled 감지는 server-side onTurn에서 'stalled' ws op으로 broadcast.
+  // renderActive는 감지 없이 ch.stalled 상태만 표시.
   const visible = allTurns.filter(t => !shouldHideTurn(t));
   const hiddenCount = allTurns.length - visible.length;
   const pending = ch.pendingInputs || [];
@@ -1231,7 +1220,7 @@ function renderActive() {
 }
 
 function renderStalledBanner(s) {
-  if (!s || s.dismissed) return '';
+  if (!s) return '';
   // s: { kind: 'auth' | 'rate_limit' | 'exit', message, resetAt? }
   const dismissBtn = `<button type="button" class="ec-btn" id="stalled-dismiss" style="margin-left:auto">✕ 닫기</button>`;
   if (s.kind === 'auth') {
@@ -1268,8 +1257,7 @@ function renderStalledBanner(s) {
   </div>`;
 }
 async function wireStalledBanner(ch) {
-  // dismissed sentinel — null 대신 {dismissed:true}로 재감지 루프 건너뜀
-  const dismiss = () => { ch.stalled = { dismissed: true }; renderActive(); };
+  const dismiss = () => { ch.stalled = null; renderActive(); };
   $('stalled-dismiss')?.addEventListener('click', dismiss);
   $('stalled-login')?.addEventListener('click', async () => {
     dismiss();

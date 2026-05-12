@@ -1966,7 +1966,18 @@ function spawnSession(sess) {
       }, 40);
     };
     ch.parser = new StreamParser({
-      onTurn: () => ch.scheduleTurns(),
+      onTurn: (turn) => {
+        ch.scheduleTurns();
+        // 현재 spawn의 parser가 만든 turn에서만 stalled 감지 — client-side 재감지 없음
+        if (turn.type === 'assistant' || turn.type === 'result') {
+          const b = typeof turn.body === 'string' ? turn.body : '';
+          if (/not logged in|please run \/login|please log in|invalid api key|api key not found/i.test(b)) {
+            ch.broadcast({ op: 'stalled', kind: 'auth', message: b.slice(0, 400) });
+          } else if (/rate limit|usage limit reached|quota exceeded|too many requests/i.test(b)) {
+            ch.broadcast({ op: 'stalled', kind: 'rate_limit', message: b.slice(0, 400) });
+          }
+        }
+      },
       onTurnUpdate: () => ch.scheduleTurns(),
       onSystem: (session) => ch.broadcast({ op: 'system', session }),
       onUsage:  (usage)   => ch.broadcast({ op: 'usage', usage }),
