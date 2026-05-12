@@ -2670,4 +2670,5 @@ $('rs-q')?.addEventListener('input', scheduleSearch);
 // ── 시작 ──────────────────────────────────────────────────────────────────────
 applyCfg();
 loadClaudeOptions();
+renderActive();   // 첫 페이지 로드: activeSid=null → 홈 대시보드 즉시 표시
 connect();
