@@ -14,6 +14,31 @@ const { startWatcher: startInboxWatcher, eventToChannelText, detectAgentIdentity
 // ── auth process tracking (login OAuth 플로우 상태) ─────────────────────────
 const authProcs = new Map(); // home → { proc, url, status, output, error, exitCode }
 
+// ── ec native OAuth token 저장 (setup-token 결과 보관) ─────────────────────
+// claude setup-token 은 토큰을 stdout으로 출력만 하고 .credentials.json에 저장하지 않음.
+// ec는 그 토큰을 추출해서 XDG data dir 안 oauth_tokens.json 에 home별로 보관하고,
+// claude spawn 또는 auth status 호출 시 CLAUDE_CODE_OAUTH_TOKEN 환경변수로 주입한다.
+function _ecTokensPath() {
+  const xdgData = process.env.XDG_DATA_HOME || path.join(process.env.HOME || '/tmp', '.local', 'share');
+  return path.join(xdgData, 'easyclaude', 'oauth_tokens.json');
+}
+function loadEcTokens() {
+  try { return JSON.parse(fs.readFileSync(_ecTokensPath(), 'utf8')); } catch { return {}; }
+}
+function saveEcToken(home, token) {
+  const p = _ecTokensPath();
+  ensureDir(path.dirname(p));
+  const m = loadEcTokens();
+  m[home] = token;
+  try { fs.writeFileSync(p, JSON.stringify(m, null, 2), { mode: 0o600 }); }
+  catch (e) { console.error(`[easyclaude] save ec token fail: ${e.message}`); }
+}
+function getEcToken(home) {
+  const m = loadEcTokens();
+  return m[home] || null;
+}
+const OAUTH_TOKEN_RE = /\bsk-ant-oat\d+-[A-Za-z0-9_-]{30,}/;
+
 // 세션이 jsonl을 찾아야 할 HOME 후보 — overlay HOME 우선
 function homesForSession(sess) {
   const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
@@ -771,6 +796,8 @@ const server = http.createServer((req, res) => {
     const info = inspectClaudeHome(home) || { home, claudeDir: path.join(home, '.claude'), email: null, hasCredentials: false, readable: true, writable: true };
     info.overlayEnabled = overlayEnabled;
     info.realHome = process.env.HOME;
+    info.hasEcToken = !!getEcToken(home);
+    if (info.hasEcToken) info.hasCredentials = true;
     res.writeHead(200, {'Content-Type':'application/json'});
     return res.end(JSON.stringify({ ok: true, ...info }));
   }
@@ -780,8 +807,11 @@ const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
     const home = u.searchParams.get('home') || process.env.HOME;
     const { spawnSync } = require('child_process');
+    const env = { ...process.env, HOME: home };
+    const ecToken = getEcToken(home);
+    if (ecToken && !env.CLAUDE_CODE_OAUTH_TOKEN) env.CLAUDE_CODE_OAUTH_TOKEN = ecToken;
     const result = spawnSync('claude', ['auth', 'status', '--json'], {
-      env: { ...process.env, HOME: home }, timeout: 10000, encoding: 'utf8',
+      env, timeout: 10000, encoding: 'utf8',
     });
     res.writeHead(200, {'Content-Type':'application/json'});
     try { return res.end(JSON.stringify(JSON.parse(result.stdout || '{}'))); }
@@ -961,7 +991,21 @@ const server = http.createServer((req, res) => {
       proc.stdout.setEncoding('utf8'); proc.stderr.setEncoding('utf8');
       proc.stdout.on('data', d => { state.output += d; tryCaptureOAuthUrl(state); });
       proc.stderr.on('data', d => { state.error  += d; tryCaptureOAuthUrl(state); });
-      proc.on('exit', (code, signal) => { state.exitCode = code; state.status = signal === 'SIGTERM' ? 'killed' : (code === 0 ? 'success' : 'failed'); });
+      proc.on('exit', (code, signal) => {
+        state.exitCode = code;
+        state.status = signal === 'SIGTERM' ? 'killed' : (code === 0 ? 'success' : 'failed');
+        // setup-token이 stdout으로 발급한 'sk-ant-oat...' 토큰을 추출해 ec 영역 저장.
+        if (state.status === 'success') {
+          const cleaned = stripAnsi(state.output || '').replace(/\s+/g, '');
+          const tm = cleaned.match(OAUTH_TOKEN_RE);
+          if (tm) {
+            saveEcToken(home, tm[0]);
+            console.log(`[easyclaude] ec native token saved for ${home} (len=${tm[0].length})`);
+          } else {
+            console.warn(`[easyclaude] setup-token success but token not parsed from output (home=${home})`);
+          }
+        }
+      });
       // PTY 안 claude는 splash ~10s 후 URL 출력. timeout 충분히.
       const respondAt = Date.now() + 15000;
       const tick = setInterval(() => {
@@ -1494,6 +1538,11 @@ function spawnSession(sess) {
       } catch (e) {
         console.error(`[easyclaude] overlay setup fail: ${e.message}`);
       }
+    }
+    // ec native OAuth token 자동 주입 (setup-token으로 받은 게 있으면)
+    const ecToken = getEcToken(childEnv.HOME);
+    if (ecToken && !childEnv.CLAUDE_CODE_OAUTH_TOKEN) {
+      childEnv.CLAUDE_CODE_OAUTH_TOKEN = ecToken;
     }
 
     proc = spawn('claude', args, {
