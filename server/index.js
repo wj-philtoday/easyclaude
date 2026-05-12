@@ -787,6 +787,139 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify({ list: [info] }));
   }
 
+  // /api/scoped/extensions?sid=<sid>
+  // user/project/local 3개 scope의 settings.json에서 mcp/plugin/skill 합쳐서 반환.
+  // 각 항목: scope, name, enabled, source(file path), config
+  if (req.url.startsWith('/api/scoped/extensions')) {
+    const u = new URL(req.url, 'http://x');
+    const sid = u.searchParams.get('sid') || '';
+    const sess = findSession(sid);
+    const ovHome = (() => {
+      const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
+      try { return overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+      catch { return process.env.HOME; }
+    })();
+    const cwd = sess?.cwd || null;
+    const scopes = [
+      { scope: 'user', file: path.join(ovHome, '.claude', 'settings.json'), dir: path.join(ovHome, '.claude') },
+    ];
+    if (cwd) {
+      scopes.push({ scope: 'project', file: path.join(cwd, '.claude', 'settings.json'), dir: path.join(cwd, '.claude') });
+      scopes.push({ scope: 'local',   file: path.join(cwd, '.claude', 'settings.local.json'), dir: path.join(cwd, '.claude') });
+    }
+    const out = { mcp: [], plugins: [], skills: [], scopes: scopes.map(s => ({ scope: s.scope, file: s.file })) };
+    for (const sc of scopes) {
+      let s = {};
+      try { s = JSON.parse(fs.readFileSync(sc.file, 'utf8')); } catch {}
+      // mcpServers
+      const servers = (s && typeof s.mcpServers === 'object') ? s.mcpServers : {};
+      const disabledList = Array.isArray(s.disabledMcpjsonServers) ? s.disabledMcpjsonServers : [];
+      const enabledList  = Array.isArray(s.enabledMcpjsonServers)  ? s.enabledMcpjsonServers  : null;
+      for (const [name, config] of Object.entries(servers)) {
+        const enabled = enabledList ? enabledList.includes(name) : !disabledList.includes(name);
+        out.mcp.push({ scope: sc.scope, file: sc.file, name, enabled, config });
+      }
+      // plugins (claude code v2 — 정확한 schema 미확정, generic 처리)
+      const plugins = (s && typeof s.plugins === 'object') ? s.plugins : {};
+      for (const [name, p] of Object.entries(plugins)) {
+        const enabled = !(p && p.enabled === false);
+        out.plugins.push({ scope: sc.scope, file: sc.file, name, enabled, config: p });
+      }
+      const enabledPluginList = Array.isArray(s.enabledPlugins) ? s.enabledPlugins : null;
+      if (enabledPluginList) {
+        for (const name of enabledPluginList) {
+          if (!out.plugins.find(p => p.scope === sc.scope && p.name === name)) {
+            out.plugins.push({ scope: sc.scope, file: sc.file, name, enabled: true, config: null });
+          }
+        }
+      }
+      // skills — 디렉토리 기반
+      const skillsDir = path.join(sc.dir, 'skills');
+      const disabledSkills = Array.isArray(s.disabledSkills) ? s.disabledSkills : [];
+      if (fs.existsSync(skillsDir)) {
+        try {
+          for (const sd of fs.readdirSync(skillsDir)) {
+            const skillPath = path.join(skillsDir, sd);
+            let stat;
+            try { stat = fs.lstatSync(skillPath); } catch { continue; }
+            // 디렉토리 또는 디렉토리 심볼릭이 SKILL.md 포함하면 skill로 인정
+            let isSkillDir = false;
+            try {
+              const target = stat.isSymbolicLink() ? fs.statSync(skillPath) : stat;
+              if (target.isDirectory() && fs.existsSync(path.join(skillPath, 'SKILL.md'))) isSkillDir = true;
+            } catch {}
+            if (!isSkillDir) continue;
+            out.skills.push({
+              scope: sc.scope,
+              dir: skillPath,
+              name: sd,
+              enabled: !disabledSkills.includes(sd),
+              symlink: stat.isSymbolicLink(),
+            });
+          }
+        } catch {}
+      }
+    }
+    res.writeHead(200, {'Content-Type':'application/json'});
+    return res.end(JSON.stringify({ ok: true, sid, cwd, ovHome, ...out }));
+  }
+
+  // /api/scoped/toggle  POST {scope, kind:'mcp'|'plugin'|'skill', name, enabled, sid}
+  // scope settings.json에서 해당 항목의 enable 상태 토글 (활성/비활성).
+  if (req.url === '/api/scoped/toggle') {
+    if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
+    return readJsonBody(req, (err, body) => {
+      if (err) { res.writeHead(400); return res.end(err.message); }
+      const { scope, kind, name, enabled, sid } = body || {};
+      if (!scope || !kind || !name || typeof enabled !== 'boolean') {
+        res.writeHead(400, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: 'scope/kind/name/enabled required' }));
+      }
+      const sess = findSession(sid || '');
+      const ovHome = (() => {
+        const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
+        try { return overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+        catch { return process.env.HOME; }
+      })();
+      const cwd = sess?.cwd || null;
+      let file;
+      if (scope === 'user') file = path.join(ovHome, '.claude', 'settings.json');
+      else if (scope === 'project' && cwd) file = path.join(cwd, '.claude', 'settings.json');
+      else if (scope === 'local' && cwd) file = path.join(cwd, '.claude', 'settings.local.json');
+      else { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope or missing cwd' })); }
+      let s = {};
+      try { s = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {}; } catch (e) {
+        res.writeHead(500, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: 'parse fail: ' + e.message }));
+      }
+      if (kind === 'mcp') {
+        s.disabledMcpjsonServers = Array.isArray(s.disabledMcpjsonServers) ? s.disabledMcpjsonServers : [];
+        if (enabled) s.disabledMcpjsonServers = s.disabledMcpjsonServers.filter(n => n !== name);
+        else if (!s.disabledMcpjsonServers.includes(name)) s.disabledMcpjsonServers.push(name);
+      } else if (kind === 'plugin') {
+        s.plugins = (s.plugins && typeof s.plugins === 'object') ? s.plugins : {};
+        s.plugins[name] = s.plugins[name] || {};
+        s.plugins[name].enabled = enabled;
+      } else if (kind === 'skill') {
+        s.disabledSkills = Array.isArray(s.disabledSkills) ? s.disabledSkills : [];
+        if (enabled) s.disabledSkills = s.disabledSkills.filter(n => n !== name);
+        else if (!s.disabledSkills.includes(name)) s.disabledSkills.push(name);
+      } else {
+        res.writeHead(400, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: 'kind must be mcp|plugin|skill' }));
+      }
+      try {
+        ensureDir(path.dirname(file));
+        fs.writeFileSync(file, JSON.stringify(s, null, 2));
+        res.writeHead(200, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ ok: true, file, hint: '활성 세션에 적용하려면 재기동 필요' }));
+      } catch (e) {
+        res.writeHead(500, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ error: 'write fail: ' + e.message }));
+      }
+    });
+  }
+
   // /api/ec-home — ec가 현재 사용 중인 단일 HOME 정보
   if (req.url === '/api/ec-home' || req.url.startsWith('/api/ec-home?')) {
     const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);

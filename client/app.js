@@ -1567,7 +1567,7 @@ function openInfoPanel() {
     </section>
 
     <section class="ec-info-section">
-      <h4>MCP (${(s.mcpServers||[]).length})</h4>
+      <h4>MCP 라이브 상태 (${(s.mcpServers||[]).length})</h4>
       <div class="ec-mcp-list">
         ${(s.mcpServers||[]).map(m => `
           <div class="ec-mcp-row">
@@ -1578,12 +1578,11 @@ function openInfoPanel() {
     </section>
 
     <section class="ec-info-section">
-      <h4>에이전트 / 스킬</h4>
-      <div class="ec-info-tags">
-        ${(s.agents||[]).map(a => `<span class="ec-tag">${esc(a)}</span>`).join('') || '<span class="ec-muted">없음</span>'}
-      </div>
-      <div class="ec-info-tags" style="margin-top:4px">
-        ${(s.skills||[]).map(a => `<span class="ec-tag ec-tag-skill">${esc(a)}</span>`).join('')}
+      <h4>확장 (scope별 설정)</h4>
+      <small class="ec-field-hint">user(ec HOME) / project(&lt;cwd&gt;/.claude/settings.json) / local(&lt;cwd&gt;/.claude/settings.local.json). 토글 후 재기동 필요.</small>
+      <div id="ec-ext-list" style="margin-top:8px"><div class="ec-empty">로드 중…</div></div>
+      <div class="ec-info-tags" style="margin-top:8px">
+        ${(s.agents||[]).map(a => `<span class="ec-tag">${esc(a)}</span>`).join('') || ''}
       </div>
     </section>
 
@@ -1619,6 +1618,84 @@ function openInfoPanel() {
     </section>
   `;
   $('ec-info').classList.remove('ec-hidden');
+  // 확장 (scope별 mcp/plugin/skill) 비동기 로드
+  loadAndRenderExtensions(ch.sessionId);
+}
+
+// scope별 확장 데이터 로드 + 렌더
+const SCOPE_LABEL = { user: 'user', project: 'project', local: 'local' };
+const SCOPE_ORDER = ['user', 'project', 'local'];
+async function loadAndRenderExtensions(sid) {
+  const $el = $('ec-ext-list');
+  if (!$el) return;
+  try {
+    const r = await fetch(apiBase() + 'api/scoped/extensions?sid=' + encodeURIComponent(sid));
+    const d = await r.json();
+    if (!d.ok) { $el.innerHTML = `<div class="ec-empty">로드 실패</div>`; return; }
+    const sections = [
+      { key: 'mcp', label: 'MCP 서버', items: d.mcp || [] },
+      { key: 'plugin', label: 'Plugin', items: d.plugins || [] },
+      { key: 'skill', label: 'Skill', items: d.skills || [] },
+    ];
+    const renderSection = (sec) => {
+      const byScope = {};
+      for (const it of sec.items) {
+        if (!byScope[it.scope]) byScope[it.scope] = [];
+        byScope[it.scope].push(it);
+      }
+      const rows = SCOPE_ORDER.map(scope => {
+        const list = byScope[scope] || [];
+        if (!list.length) return '';
+        return `
+          <div class="ec-ext-scope">
+            <div class="ec-ext-scope-head"><b>${esc(SCOPE_LABEL[scope])}</b> <span class="ec-muted">(${list.length})</span></div>
+            ${list.map(it => `
+              <label class="ec-ext-row">
+                <input type="checkbox" class="ec-ext-toggle"
+                  data-kind="${sec.key}" data-scope="${esc(it.scope)}" data-name="${esc(it.name)}"
+                  ${it.enabled ? 'checked' : ''}>
+                <code>${esc(it.name)}</code>
+                ${sec.key === 'mcp' && it.config?.command ? `<span class="ec-muted ec-ext-meta">${esc(it.config.command)}${(it.config.args||[]).length?' '+esc((it.config.args||[]).slice(0,2).join(' ')):''}</span>` : ''}
+                ${sec.key === 'mcp' && it.config?.url ? `<span class="ec-muted ec-ext-meta">${esc(it.config.url)}</span>` : ''}
+                ${sec.key === 'skill' && it.symlink ? `<span class="ec-muted ec-ext-meta">(symlink)</span>` : ''}
+              </label>
+            `).join('')}
+          </div>`;
+      }).filter(Boolean).join('');
+      return `
+        <details class="ec-ext-cat" open>
+          <summary><b>${esc(sec.label)}</b> <span class="ec-muted">(${sec.items.length})</span></summary>
+          ${rows || '<div class="ec-empty">없음</div>'}
+        </details>`;
+    };
+    $el.innerHTML = sections.map(renderSection).join('');
+    $el.querySelectorAll('.ec-ext-toggle').forEach(cb => {
+      cb.addEventListener('change', async () => {
+        const kind  = cb.dataset.kind;
+        const scope = cb.dataset.scope;
+        const name  = cb.dataset.name;
+        const enabled = cb.checked;
+        cb.disabled = true;
+        try {
+          const r2 = await fetch(apiBase() + 'api/scoped/toggle', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ sid, scope, kind, name, enabled }),
+          });
+          const data = await r2.json();
+          if (!r2.ok || data.error) {
+            alert(data.error || ('HTTP ' + r2.status));
+            cb.checked = !enabled;
+          }
+        } catch (e) {
+          alert('오류: ' + e.message);
+          cb.checked = !enabled;
+        }
+        cb.disabled = false;
+      });
+    });
+  } catch (e) {
+    $el.innerHTML = `<div class="ec-empty">로드 실패: ${esc(e.message)}</div>`;
+  }
 }
 
 $('ec-info-btn')?.addEventListener('click', openInfoPanel);
