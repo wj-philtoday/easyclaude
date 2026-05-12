@@ -196,12 +196,14 @@ let reconnectTimer = null;
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const base  = location.pathname.replace(/[^/]*$/, '') || '/';
+  setStatus('connecting…', 'warn');
   ws = new WebSocket(`${proto}://${location.host}${base}`);
   ws.addEventListener('open', () => {
     setStatus('connected', 'ok');
     reconnectAttempts = 0;
-    channels.clear();
-    activeSid = null;
+    // channels.clear() + activeSid=null 을 제거 — reconnect 시 이전 UI 상태 보존.
+    // 대신 기존 채널들을 alive=false 로만 표시하고, server 'sessions' 응답 후 재open.
+    for (const ch of channels.values()) { ch.alive = false; }
     sendWs({ op: 'list' });
     // outbound queue flush
     if (outboundQueue.length) {
