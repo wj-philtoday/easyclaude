@@ -4,6 +4,7 @@
 
 const { WebSocketServer } = require('ws');
 const { spawn } = require('child_process');
+const net = require('net');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -1491,6 +1492,82 @@ const server = http.createServer((req, res) => {
     }
   }
 
+  // /api/version — ec 자체 버전 + git 상태 (commit / behind upstream)
+  if (req.url === '/api/version') {
+    const { spawnSync } = require('child_process');
+    const pkgPath = path.join(__dirname, '..', 'package.json');
+    let pkgVersion = '?';
+    try { pkgVersion = JSON.parse(fs.readFileSync(pkgPath, 'utf8')).version; } catch {}
+    const ec = (cmd, args) => spawnSync(cmd, args, { cwd: path.join(__dirname, '..'), timeout: 4000, encoding: 'utf8' });
+    const head = ec('git', ['rev-parse', '--short', 'HEAD']).stdout.trim() || null;
+    const branch = ec('git', ['rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim() || null;
+    // upstream 비교 (fetch 안 함 — UI에서 'check' 액션이 별도 fetch 트리거)
+    const ahead  = ec('git', ['rev-list', '--count', '@{u}..HEAD']).stdout.trim();
+    const behind = ec('git', ['rev-list', '--count', 'HEAD..@{u}']).stdout.trim();
+    res.writeHead(200, {'Content-Type':'application/json'});
+    return res.end(JSON.stringify({
+      ok: true,
+      version: pkgVersion,
+      commit: head,
+      branch,
+      ahead:  parseInt(ahead  || '0', 10),
+      behind: parseInt(behind || '0', 10),
+    }));
+  }
+  // /api/version/check — git fetch 후 behind 재계산 (네트워크 필요)
+  if (req.url === '/api/version/check') {
+    if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
+    const { spawnSync } = require('child_process');
+    const ec = (cmd, args) => spawnSync(cmd, args, { cwd: path.join(__dirname, '..'), timeout: 15000, encoding: 'utf8' });
+    const fetched = ec('git', ['fetch', 'origin', 'main']);
+    const behind = ec('git', ['rev-list', '--count', 'HEAD..@{u}']).stdout.trim();
+    res.writeHead(200, {'Content-Type':'application/json'});
+    return res.end(JSON.stringify({
+      ok: fetched.status === 0,
+      behind: parseInt(behind || '0', 10),
+      stderr: fetched.stderr || null,
+    }));
+  }
+  // /api/version/update — git pull + npm install + ec restart (detached, 호출자 죽어도 진행)
+  if (req.url === '/api/version/update') {
+    if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
+    const updateScript = path.join(__dirname, '..', 'scripts', 'update.sh');
+    if (!fs.existsSync(updateScript)) {
+      res.writeHead(500, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ error: 'update.sh not found' }));
+    }
+    // detached spawn — process tree 분리. ec server 재기동까지 처리.
+    const out = fs.openSync('/tmp/easyclaude-update.log', 'a');
+    const p = spawn('setsid', ['bash', updateScript], {
+      detached: true,
+      stdio: ['ignore', out, out],
+      cwd: path.join(__dirname, '..'),
+    });
+    p.unref();
+    fs.closeSync(out);
+    res.writeHead(200, {'Content-Type':'application/json'});
+    return res.end(JSON.stringify({ ok: true, scheduled: true, log: '/tmp/easyclaude-update.log',
+      hint: 'ec server는 곧 재기동됩니다. 30초 후 새로고침하세요.' }));
+  }
+
+  // /api/restart — ec server 만 재기동 (supervisor + 자식 claude는 살아있음)
+  if (req.url === '/api/restart') {
+    if (req.method !== 'POST') { res.writeHead(405); return res.end('POST required'); }
+    const restartScript = path.join(__dirname, '..', 'scripts', 'restart.sh');
+    if (!fs.existsSync(restartScript)) {
+      res.writeHead(500, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ error: 'restart.sh not found' }));
+    }
+    const out = fs.openSync('/tmp/easyclaude-restart.log', 'a');
+    const p = spawn('setsid', ['bash', restartScript], {
+      detached: true, stdio: ['ignore', out, out], cwd: path.join(__dirname, '..'),
+    });
+    p.unref();
+    fs.closeSync(out);
+    res.writeHead(200, {'Content-Type':'application/json'});
+    return res.end(JSON.stringify({ ok: true, scheduled: true, hint: '약 3초 후 ec server 재기동' }));
+  }
+
   // /api/ec-config — ec 자체 설정(cfg.json) GET/PUT
   // cfg는 module load 시점 const라 PUT 후 재기동 필요. response의 needsRestart=true 안내.
   if (req.url.startsWith('/api/ec-config')) {
@@ -1946,66 +2023,171 @@ function spawnSession(sess) {
       childEnv.CLAUDE_CODE_OAUTH_TOKEN = ecToken;
     }
 
-    proc = spawn('claude', args, {
-      cwd: sess.cwd,
-      env: childEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    proc.stdout.setEncoding('utf8');
-    proc.stderr.setEncoding('utf8');
-    proc.stdin.on('error', err => {
-      console.error(`[easyclaude:${sess.id}:stdin] ${err.code || err.message}`);
-    });
-
-    ch.proc = proc;
-    ch.alive = true;
-    ch.lineBuf = '';
+    // supervisor 모드 (default ON) — claude를 detached supervisor process 아래에 두고
+    // unix socket으로 stdin/stdout 통신. ec server 재기동되어도 claude 살아남는다.
+    // cfg.supervisor.enabled === false 일 때만 직접 spawn (legacy).
+    const supervisorEnabled = !(cfg && cfg.supervisor && cfg.supervisor.enabled === false);
+    if (supervisorEnabled) {
+      proc = attachSupervisor(sess, ch, args, childEnv);
+    } else {
+      proc = spawn('claude', args, {
+        cwd: sess.cwd,
+        env: childEnv,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      proc.stdout.setEncoding('utf8');
+      proc.stderr.setEncoding('utf8');
+      proc.stdin.on('error', err => {
+        console.error(`[easyclaude:${sess.id}:stdin] ${err.code || err.message}`);
+      });
+      ch.proc = proc;
+      ch.alive = true;
+      ch.lineBuf = '';
+      proc.stdout.on('data', data => handleClaudeStdout(ch, data));
+      proc.stderr.on('data', data => handleClaudeStderr(ch, data));
+      proc.on('exit', (exitCode, signal) => handleClaudeExit(ch, exitCode, signal));
+      proc.on('error', err => handleClaudeError(ch, err));
+    }
   } finally {
     ch.spawning = false;
   }
 
-  proc.stdout.on('data', data => {
-    ch.lineBuf += data;
-    let nl;
-    while ((nl = ch.lineBuf.indexOf('\n')) >= 0) {
-      const line = ch.lineBuf.slice(0, nl).replace(/\r$/, '');
-      ch.lineBuf = ch.lineBuf.slice(nl + 1);
-      if (line) {
-        ch.rawLog.push(line);
-        if (ch.rawLog.length > 200) ch.rawLog.shift();
-        ch.parser.feedLine(line);
-        maybeStartInboxFromLine(ch, line);
-      }
-    }
-  });
-
-  proc.stderr.on('data', data => {
-    const txt = String(data);
-    console.error(`[easyclaude:${sess.id}:stderr] ${txt.trim()}`);
-    ch.stderrLog.push(txt);
-    if (ch.stderrLog.length > 100) ch.stderrLog.shift();
-  });
-
-  proc.on('exit', (exitCode, signal) => {
-    console.log(`[easyclaude] claude exited: ${sess.id} (code=${exitCode}, signal=${signal})`);
-    if (ch.debounceTimer) { clearTimeout(ch.debounceTimer); ch.debounceTimer = null; }
-    if (ch.inboxStop) { try { ch.inboxStop(); } catch {} ch.inboxStop = null; ch.signedInAs = null; }
-    const snap = ch.parser.snapshot();
-    ch.broadcast({ op: 'turns', turns: snap.turns, usage: snap.session.usage });
-    ch.broadcast({ op: 'closed', exitCode, signal, stderr: ch.stderrLog.join('').slice(-2000) });
-    ch.alive = false;
-    ch.proc = null;
-    // ch 자체는 ptyChannels 에 유지 — parser/turns 보존
-  });
-
-  proc.on('error', err => {
-    console.error(`[easyclaude] spawn error ${sess.id}:`, err.message);
-    ch.broadcast({ op: 'closed', error: err.message });
-    ch.alive = false;
-    ch.proc = null;
-  });
-
   return ch;
+}
+
+// stdout chunk → 라인 단위 parser
+function handleClaudeStdout(ch, data) {
+  ch.lineBuf += data;
+  let nl;
+  while ((nl = ch.lineBuf.indexOf('\n')) >= 0) {
+    const line = ch.lineBuf.slice(0, nl).replace(/\r$/, '');
+    ch.lineBuf = ch.lineBuf.slice(nl + 1);
+    if (line) {
+      ch.rawLog.push(line);
+      if (ch.rawLog.length > 200) ch.rawLog.shift();
+      ch.parser.feedLine(line);
+      maybeStartInboxFromLine(ch, line);
+    }
+  }
+}
+function handleClaudeStderr(ch, data) {
+  const txt = String(data);
+  console.error(`[easyclaude:${ch.sess.id}:stderr] ${txt.trim()}`);
+  ch.stderrLog.push(txt);
+  if (ch.stderrLog.length > 100) ch.stderrLog.shift();
+}
+function handleClaudeExit(ch, exitCode, signal) {
+  console.log(`[easyclaude] claude exited: ${ch.sess.id} (code=${exitCode}, signal=${signal})`);
+  if (ch.debounceTimer) { clearTimeout(ch.debounceTimer); ch.debounceTimer = null; }
+  if (ch.inboxStop) { try { ch.inboxStop(); } catch {} ch.inboxStop = null; ch.signedInAs = null; }
+  const snap = ch.parser.snapshot();
+  ch.broadcast({ op: 'turns', turns: snap.turns, usage: snap.session.usage });
+  ch.broadcast({ op: 'closed', exitCode, signal, stderr: ch.stderrLog.join('').slice(-2000) });
+  ch.alive = false;
+  ch.proc = null;
+}
+function handleClaudeError(ch, err) {
+  console.error(`[easyclaude] spawn error ${ch.sess.id}:`, err.message);
+  ch.broadcast({ op: 'closed', error: err.message });
+  ch.alive = false;
+  ch.proc = null;
+}
+
+// supervisor 부착 — 살아있는 supervisor 있으면 connect만, 없으면 detached spawn 후 connect.
+// 반환: 가상 proc 객체 (proc.stdin.write / proc.kill / proc.pid / proc.exitCode 호환)
+function attachSupervisor(sess, ch, args, childEnv) {
+  const supBaseDir = path.join(XDG_DATA_HOME, 'easyclaude', 'sup');
+  ensureDir(supBaseDir);
+  const safeId = sess.id.replace(/[^A-Za-z0-9_.-]/g, '_');
+  const sockPath = path.join(supBaseDir, `${safeId}.sock`);
+  const pidPath  = path.join(supBaseDir, `${safeId}.pid`);
+  const logPath  = path.join(supBaseDir, `${safeId}.log`);
+
+  // 살아있는 supervisor pid 확인
+  let supAlive = false;
+  let supPid = null;
+  try {
+    const txt = fs.readFileSync(pidPath, 'utf8').trim();
+    supPid = parseInt(txt, 10);
+    if (supPid > 0) { try { process.kill(supPid, 0); supAlive = true; } catch {} }
+  } catch {}
+
+  if (!supAlive) {
+    // detached spawn 새 supervisor
+    try { fs.unlinkSync(sockPath); } catch {}
+    try { fs.unlinkSync(pidPath); } catch {}
+    const supArgs = [
+      path.join(__dirname, 'supervisor.js'),
+      sess.id, sockPath, pidPath, sess.cwd,
+      JSON.stringify(args), JSON.stringify(childEnv),
+    ];
+    const out = fs.openSync(logPath, 'a');
+    const supProc = spawn(process.execPath, supArgs, {
+      detached: true,
+      stdio: ['ignore', out, out],
+    });
+    supProc.unref();
+    fs.closeSync(out);
+    console.log(`[easyclaude] supervisor spawned: ${sess.id} pid=${supProc.pid} sock=${sockPath}`);
+  } else {
+    console.log(`[easyclaude] supervisor reattach: ${sess.id} pid=${supPid} sock=${sockPath}`);
+  }
+
+  // virtual proc 만들기
+  const virt = {
+    pid: null, exitCode: null,
+    _sock: null,
+    stdin: { write: (data) => virt._send({ op: 'input', data }), on: () => {} },
+    kill: (sig) => virt._send({ op: 'kill', signal: sig || 'SIGTERM' }),
+    _send(obj) {
+      if (!this._sock || this._sock.destroyed) return;
+      try { this._sock.write(JSON.stringify(obj) + '\n'); } catch {}
+    },
+  };
+  ch.proc = virt;
+  ch.alive = true;
+  ch.lineBuf = '';
+
+  function connectSocket(retriesLeft) {
+    const sock = net.createConnection(sockPath);
+    let inbuf = '';
+    sock.on('connect', () => {
+      virt._sock = sock;
+      console.log(`[easyclaude] supervisor connected: ${sess.id}`);
+    });
+    sock.on('data', d => {
+      inbuf += String(d);
+      let nl;
+      while ((nl = inbuf.indexOf('\n')) >= 0) {
+        const line = inbuf.slice(0, nl); inbuf = inbuf.slice(nl + 1);
+        if (!line) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.op === 'hello') { virt.pid = msg.claudePid; }
+        else if (msg.op === 'stdout') handleClaudeStdout(ch, msg.data);
+        else if (msg.op === 'stderr') handleClaudeStderr(ch, msg.data);
+        else if (msg.op === 'exit') {
+          virt.exitCode = msg.code;
+          handleClaudeExit(ch, msg.code, msg.signal);
+        }
+      }
+    });
+    sock.on('error', err => {
+      // supervisor가 아직 listen 시작 안 했을 수 있음 → 재시도
+      if (retriesLeft > 0 && (err.code === 'ENOENT' || err.code === 'ECONNREFUSED')) {
+        setTimeout(() => connectSocket(retriesLeft - 1), 100);
+      } else {
+        console.error(`[easyclaude] supervisor socket error ${sess.id}: ${err.message}`);
+        handleClaudeError(ch, err);
+      }
+    });
+    sock.on('close', () => {
+      virt._sock = null;
+    });
+  }
+  connectSocket(30);  // 최대 3초 (100ms × 30) 대기
+
+  return virt;
 }
 
 // ── IOA 인박스 watcher trigger ───────────────────────────────────────────────

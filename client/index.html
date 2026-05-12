@@ -291,6 +291,19 @@
       </section>
 
       <section class="ec-settings-section">
+        <h4>렌더링</h4>
+        <label class="ec-field" style="flex-direction:row;align-items:center;gap:10px">
+          <input type="checkbox" id="cfg-render-md" style="width:auto">
+          <span style="flex:1;margin-bottom:0">마크다운 렌더링 (대화창에 heading·bold·표·코드블록)</span>
+        </label>
+        <label class="ec-field" style="flex-direction:row;align-items:center;gap:10px;margin-top:8px">
+          <input type="checkbox" id="cfg-render-mathjax" style="width:auto">
+          <span style="flex:1;margin-bottom:0">MathJax 수식 렌더링 (<code>$…$</code> / <code>$$…$$</code>)</span>
+        </label>
+        <small class="ec-field-hint">채팅창 표시 방식만 변경. claude에 마크다운/수식을 쓰게 하려면 "ec 설정"의 응답 포맷도 함께 활성화하세요.</small>
+      </section>
+
+      <section class="ec-settings-section">
         <h4>안전</h4>
         <label class="ec-field" style="flex-direction:row;align-items:center;gap:10px">
           <input id="cfg-bypass-enabled" type="checkbox" style="width:auto">
@@ -368,6 +381,17 @@
         <h4>ec 설정</h4>
         <small class="ec-field-hint">ec 환경(HOME overlay) · 응답 포맷 · 편의 기능. 저장 후 재기동 필요.</small>
         <div style="margin-top:8px"><button id="cfg-ec-edit-btn" class="ec-btn">ec 설정 열기…</button></div>
+      </section>
+
+      <section class="ec-settings-section">
+        <h4>버전</h4>
+        <div id="cfg-version-info" style="font-size:12.5px;color:var(--text-2);margin-bottom:8px">조회 중…</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button type="button" id="cfg-version-check" class="ec-btn">최신 확인</button>
+          <button type="button" id="cfg-version-update" class="ec-btn ec-btn-primary">업데이트 + 재기동</button>
+          <button type="button" id="cfg-restart" class="ec-btn">ec 재기동만</button>
+        </div>
+        <small class="ec-field-hint">supervisor 도입 후 ec 재기동해도 대화 세션은 보존됩니다.</small>
       </section>
 
       <section class="ec-settings-section">
@@ -520,6 +544,22 @@
   </div>
 </div>
 
-<script src="app.js?v=20260512q"></script>
+<!-- 마크다운 + DOMPurify + MathJax (ec 렌더링 옵션 활성 시 사용) -->
+<script>
+window.MathJax = {
+  tex: {
+    inlineMath: [['$','$'], ['\\(','\\)']],
+    displayMath: [['$$','$$'], ['\\[','\\]']],
+    processEscapes: true,
+  },
+  options: { skipHtmlTags: ['script','noscript','style','textarea','pre','code'] },
+  startup: { typeset: false },
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
+
+<script src="app.js?v=20260512s"></script>
 </body>
 </html>

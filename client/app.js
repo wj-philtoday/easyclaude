@@ -131,6 +131,10 @@ function syncSettingsForm() {
   set('cfg-custom-mode',  cfg.customThemeMode);
   const bypassEl = $('cfg-bypass-enabled');
   if (bypassEl) bypassEl.checked = !!cfg.bypassEnabled;
+  const rdMd = $('cfg-render-md');
+  if (rdMd) rdMd.checked = getRenderMd();
+  const rdMj = $('cfg-render-mathjax');
+  if (rdMj) rdMj.checked = getRenderMathJax();
   for (const k of ['bg','surface','text','accent','border']) {
     set('cfg-color-' + k, (cfg.customTheme && cfg.customTheme[k]) || '');
   }
@@ -831,6 +835,43 @@ async function loadMoreHistory(ch) {
   finally { ch.histLoading = false; }
 }
 
+// ── 마크다운 / MathJax 렌더링 헬퍼 ─────────────────────────────────────────
+function getRenderMd() {
+  try { return localStorage.getItem('ec.renderMarkdown') === '1'; } catch { return false; }
+}
+function getRenderMathJax() {
+  try { return localStorage.getItem('ec.renderMathJax') === '1'; } catch { return false; }
+}
+function setRenderMd(v)       { try { localStorage.setItem('ec.renderMarkdown', v ? '1' : '0'); } catch {} }
+function setRenderMathJax(v)  { try { localStorage.setItem('ec.renderMathJax', v ? '1' : '0'); } catch {} }
+
+function ecRenderBody(text, forceMarkdown) {
+  if (!text) return '';
+  const useMd = forceMarkdown || getRenderMd();
+  if (!useMd || typeof marked === 'undefined') {
+    // plain: escape + newline to <br>
+    const s = String(text);
+    return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])).replace(/\n/g,'<br>');
+  }
+  const holders = [];
+  const protect = s => { const k = '\x02MATH' + holders.length + '\x03'; holders.push(s); return k; };
+  let t = text
+    .replace(/\$\$[\s\S]+?\$\$/g, m => protect(m))
+    .replace(/\\\[[\s\S]+?\\\]/g, m => protect(m))
+    .replace(/\$[^$\n]+?\$/g, m => protect(m))
+    .replace(/\\\([\s\S]+?\\\)/g, m => protect(m));
+  let html;
+  try { html = marked.parse(t); } catch { html = esc(t).replace(/\n/g,'<br>'); }
+  if (typeof DOMPurify !== 'undefined') html = DOMPurify.sanitize(html);
+  html = html.replace(/\x02MATH(\d+)\x03/g, (_, i) => esc(holders[+i]));
+  return html;
+}
+function ecTypeset(el) {
+  if (getRenderMathJax() && window.MathJax && MathJax.typesetPromise) {
+    MathJax.typesetPromise(el ? [el] : undefined).catch(() => {});
+  }
+}
+
 // ── 렌더 ──────────────────────────────────────────────────────────────────────
 const LABELS = {
   human:'You', assistant:'Claude',
@@ -1139,7 +1180,10 @@ function renderActive() {
   const renderOneTurn = (t) => {
     const cls = `ec-turn ec-turn-${t.type}` + (t.is_error ? ' ec-error' : '');
     const labelText = (t.type === 'meta' && t.eventType) ? `${LABELS.meta} · ${t.eventType}` : (LABELS[t.type] || t.type);
-    return `<div class="${cls}"><div class="ec-turn-label" style="color:${COLORS[t.type]||'var(--muted)'}">${esc(labelText)}</div><div class="ec-turn-body ${t.type}">${esc(t.body)}</div></div>`;
+    // assistant/human/channel은 마크다운 렌더링 대상; 나머지는 코드/원문 그대로
+    const RENDERABLE = new Set(['human','assistant','channel','thinking']);
+    const bodyHtml = RENDERABLE.has(t.type) ? ecRenderBody(t.body || '') : `<pre style="margin:0;white-space:pre-wrap;word-break:break-word">${esc(t.body||'')}</pre>`;
+    return `<div class="${cls}"><div class="ec-turn-label" style="color:${COLORS[t.type]||'var(--muted)'}">${esc(labelText)}</div><div class="ec-turn-body ${t.type}">${bodyHtml}</div></div>`;
   };
   let turnsHtml = '';
   let foldBuf = [];
@@ -1178,6 +1222,7 @@ function renderActive() {
   });
   wireStalledBanner(ch);
   if (wasAtBottom) $parsed.scrollTop = $parsed.scrollHeight;
+  ecTypeset($parsed);
 }
 
 function renderStalledBanner(s) {
@@ -1624,6 +1669,8 @@ $('cfg-title-text')?.addEventListener('input', e => { cfg.titleText = e.target.v
 $('cfg-custom-mode')?.addEventListener('change', e => { cfg.customThemeMode = e.target.value; saveCfg(); });
 $('cfg-custom-svg')?.addEventListener('input', e => { cfg.customLogoSvg = e.target.value; saveCfg(); });
 $('cfg-bypass-enabled')?.addEventListener('change', e => { cfg.bypassEnabled = e.target.checked; saveCfg(); renderPermPill(); });
+$('cfg-render-md')?.addEventListener('change', e => { setRenderMd(e.target.checked); renderActive(); });
+$('cfg-render-mathjax')?.addEventListener('change', e => { setRenderMathJax(e.target.checked); renderActive(); });
 ['bg','surface','text','accent','border'].forEach(k => {
   $('cfg-color-' + k)?.addEventListener('input', e => {
     if (!cfg.customTheme) cfg.customTheme = {};
@@ -2472,6 +2519,55 @@ async function openEcConfigEdit() {
   }
 }
 $('cfg-ec-edit-btn')?.addEventListener('click', openEcConfigEdit);
+
+// 버전 정보 + 업데이트
+async function loadVersionInfo() {
+  const $info = $('cfg-version-info');
+  if (!$info) return;
+  try {
+    const r = await fetch(apiBase() + 'api/version');
+    const d = await r.json();
+    if (!d.ok) { $info.textContent = '조회 실패'; return; }
+    let badge = '';
+    if (d.behind > 0)     badge = ` · <b style="color:var(--warn)">${d.behind} commits behind</b>`;
+    else if (d.ahead > 0) badge = ` · <span style="color:var(--text-2)">${d.ahead} ahead</span>`;
+    else                  badge = ` · <span style="color:var(--green)">최신</span>`;
+    $info.innerHTML = `v${esc(d.version)} · <code>${esc((d.commit||'').slice(0,7))}</code> · ${esc(d.branch||'')}${badge}`;
+  } catch (e) { $info.textContent = '조회 오류: ' + e.message; }
+}
+$('cfg-version-check')?.addEventListener('click', async () => {
+  const btn = $('cfg-version-check'); btn.disabled = true; btn.textContent = '확인 중…';
+  try {
+    const r = await fetch(apiBase() + 'api/version/check', { method: 'POST' });
+    const d = await r.json();
+    if (d.behind > 0) alert(`새 커밋 ${d.behind}개 사용 가능 — "업데이트 + 재기동" 클릭`);
+    else alert('최신 상태입니다.');
+    loadVersionInfo();
+  } catch (e) { alert('오류: ' + e.message); }
+  btn.disabled = false; btn.textContent = '최신 확인';
+});
+$('cfg-version-update')?.addEventListener('click', async () => {
+  if (!confirm('git pull + npm install + ec 재기동을 진행할까요?\n대화 세션은 supervisor가 보존합니다.')) return;
+  const btn = $('cfg-version-update'); btn.disabled = true; btn.textContent = '업데이트 중…';
+  try {
+    const r = await fetch(apiBase() + 'api/version/update', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok || d.error) { alert(d.error || 'HTTP ' + r.status); btn.disabled = false; btn.textContent = '업데이트 + 재기동'; return; }
+    alert(d.hint || '진행 중… 30초 후 자동 새로고침');
+    setTimeout(() => location.reload(), 30000);
+  } catch (e) { alert('오류: ' + e.message); btn.disabled = false; btn.textContent = '업데이트 + 재기동'; }
+});
+$('cfg-restart')?.addEventListener('click', async () => {
+  if (!confirm('ec server만 재기동합니다 (supervisor + 대화 세션은 보존).')) return;
+  try {
+    const r = await fetch(apiBase() + 'api/restart', { method: 'POST' });
+    const d = await r.json();
+    alert(d.hint || '재기동 요청 보냄.');
+    setTimeout(() => location.reload(), 5000);
+  } catch (e) { alert('오류: ' + e.message); }
+});
+// 설정 모달 열 때 버전 정보 갱신
+$settingsBtn?.addEventListener('click', () => { loadVersionInfo(); });
 
 // 디버그 토글 (메타/훅 이벤트 표시)
 const _cfgShowDebug = $('cfg-show-debug');

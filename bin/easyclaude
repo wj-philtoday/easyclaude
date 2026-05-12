@@ -24,6 +24,10 @@ case "$CMD" in
     shift
     exec bash "$ROOT/scripts/update.sh" "$@"
     ;;
+  restart)
+    shift
+    exec bash "$ROOT/scripts/restart.sh" "$@"
+    ;;
   tail)
     shift
     exec "$ROOT/bin/easyclaude-tail" "$@"
@@ -36,6 +40,7 @@ easyclaude — claude code 멀티 세션 워크벤치
   easyclaude [run]            서버 실행 (기본)
   easyclaude install [opts]   설치 (sudo / --user / --no-systemd / --prefix)
   easyclaude update           git pull + npm install + 프로세스 재기동
+  easyclaude restart          ec 서버만 재기동 (자식 claude는 supervisor가 살림)
   easyclaude tail <sid|uuid>  활성 세션 jsonl tail
   easyclaude help             이 도움말
 EOF
