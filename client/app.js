@@ -1753,8 +1753,12 @@ function openLogin(home) {
   $('lg-step1').classList.remove('ec-hidden');
   $('lg-step2').classList.add('ec-hidden');
   $('lg-message').textContent = '';
+  $('lg-message').style.color = 'var(--danger)';
   $('lg-url').value = '';
+  if ($('lg-code')) $('lg-code').value = '';
   $('lg-status').textContent = '대기 중…';
+  window.lgCodeSubmitted = false;
+  if (lgPollTimer) { clearInterval(lgPollTimer); lgPollTimer = null; }
   $('ec-login').classList.remove('ec-hidden');
 }
 $('lg-close')?.addEventListener('click', () => {
@@ -1785,22 +1789,7 @@ $('lg-start')?.addEventListener('click', async () => {
     else { $('lg-status').textContent = 'URL 미수신 — 상태 폴링 중'; }
     // polling
     if (lgPollTimer) clearInterval(lgPollTimer);
-    lgPollTimer = setInterval(async () => {
-      try {
-        const r2 = await fetch(apiBase() + 'api/auth/login-status?home=' + encodeURIComponent(home));
-        const s = await r2.json();
-        if (s.url && !$('lg-url').value) $('lg-url').value = s.url;
-        $('lg-status').textContent = `상태: ${s.status}${s.exitCode !== null && s.exitCode !== undefined ? ` (exit ${s.exitCode})` : ''}`;
-        if (s.status === 'success') {
-          clearInterval(lgPollTimer); lgPollTimer = null;
-          $('lg-status').textContent = '✅ 로그인 완료';
-          setTimeout(() => { $('ec-login').classList.add('ec-hidden'); renderHomesList(); }, 1200);
-        } else if (s.status === 'failed' || s.status === 'killed') {
-          clearInterval(lgPollTimer); lgPollTimer = null;
-          $('lg-message').textContent = `실패: ${s.error || s.output || s.status}`;
-        }
-      } catch (e) {}
-    }, 1500);
+    lgPollTimer = setInterval(() => pollAuth(home), 1500);
   } catch (e) {
     $('lg-message').textContent = '오류: ' + e.message;
   }
@@ -1826,23 +1815,7 @@ $('lg-setup-token')?.addEventListener('click', async () => {
     if (data.url) { $('lg-url').value = data.url; $('lg-status').textContent = '✅ URL 받음 — 새 탭/복사 후 인증'; }
     else { $('lg-status').textContent = 'URL 미수신 — 폴링 중'; }
     if (lgPollTimer) clearInterval(lgPollTimer);
-    lgPollTimer = setInterval(async () => {
-      try {
-        const r2 = await fetch(apiBase() + 'api/auth/login-status?home=' + encodeURIComponent(home));
-        const s = await r2.json();
-        if (s.url && !$('lg-url').value) $('lg-url').value = s.url;
-        $('lg-status').textContent = `상태: ${s.status}`;
-        if (s.status === 'success' || s.status === 'failed' || s.status === 'killed') {
-          clearInterval(lgPollTimer); lgPollTimer = null;
-          if (s.status === 'success') {
-            $('lg-status').textContent = '✅ 토큰 발급 완료';
-            setTimeout(() => { $('ec-login').classList.add('ec-hidden'); renderHomesList(); }, 1200);
-          } else {
-            $('lg-message').textContent = `실패: ${s.error || s.output || s.status}`;
-          }
-        }
-      } catch {}
-    }, 1500);
+    lgPollTimer = setInterval(() => pollAuth(home), 1500);
   } catch (e) {
     $('lg-message').textContent = '오류: ' + e.message;
   }
@@ -1856,6 +1829,38 @@ $('lg-copy')?.addEventListener('click', () => {
   const url = $('lg-url').value;
   if (url) navigator.clipboard?.writeText(url);
 });
+// 인증(login/setup-token) 진행 상태 폴링 — lg-status / lg-message 갱신
+// 코드 제출 후엔 status 'pending' 으로 덮지 않게 boolean flag (window.lgCodeSubmitted)
+async function pollAuth(home) {
+  try {
+    const r2 = await fetch(apiBase() + 'api/auth/login-status?home=' + encodeURIComponent(home));
+    const s = await r2.json();
+    if (s.url && !$('lg-url').value) $('lg-url').value = s.url;
+    // 진행 raw output을 작은 글씨로 노출 (디버그/사용자 인지)
+    const tail = ((s.output || '') + (s.error || '')).slice(-400).trim();
+    if (tail) {
+      $('lg-message').style.color = 'var(--text-2)';
+      $('lg-message').textContent = tail.slice(-300);
+    }
+    if (s.status === 'success') {
+      clearInterval(lgPollTimer); lgPollTimer = null;
+      $('lg-status').textContent = '✅ 완료';
+      window.lgCodeSubmitted = false;
+      setTimeout(() => { $('ec-login').classList.add('ec-hidden'); renderHomesList(); }, 1200);
+    } else if (s.status === 'failed' || s.status === 'killed') {
+      clearInterval(lgPollTimer); lgPollTimer = null;
+      $('lg-status').textContent = `❌ ${s.status}${s.exitCode != null ? ` (exit ${s.exitCode})` : ''}`;
+      $('lg-message').style.color = 'var(--danger)';
+      $('lg-message').textContent = `실패: ${(s.error || s.output || s.status || '').toString().slice(-300)}`;
+      window.lgCodeSubmitted = false;
+    } else if (!window.lgCodeSubmitted) {
+      // 코드 제출 전: 일반 진행 상태 표시
+      $('lg-status').textContent = `상태: ${s.status}${s.exitCode != null ? ` (exit ${s.exitCode})` : ''}`;
+    }
+    // 코드 제출 후 pending이면 status overwrite 안 함 (위 ✅ 코드 전송됨 유지)
+  } catch {}
+}
+
 // 콜백 URL 전체를 paste한 경우 code 파라미터만 추출.
 // 우선순위: ?code=...&state=... 형식 → code+#state 결합 (claude code의 OAuth 콜백 형식)
 function extractAuthCode(raw) {
@@ -1896,6 +1901,9 @@ $('lg-submit-code')?.addEventListener('click', async (e) => {
     }
     $('lg-status').textContent = '✅ 코드 전송됨 — 인증 진행 대기 중';
     $('lg-code').value = '';
+    window.lgCodeSubmitted = true;
+    // 폴링이 멈췄으면 재시작 (success/failed에서 정지된 경우 다시 시도)
+    if (!lgPollTimer) lgPollTimer = setInterval(() => pollAuth(home), 1500);
   } catch (err) {
     $('lg-submit-code').disabled = false;
     $('lg-message').textContent = '오류: ' + err.message;
