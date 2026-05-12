@@ -763,14 +763,15 @@ function refreshTabState() {
   updateInputBar();
 }
 
-// 에이전트 활동 중: interrupt 버튼 + restart 버튼 표시, send 숨김
-// 대기/비활성: send 버튼 표시, interrupt 숨김, restart 숨김
+// 인터럽트: 에이전트 응답 중(alive)일 때만 actionbar에 표시
+// 전송: 항상 표시 (계류 가능 — 입력 후 응답 끝나면 자동 전송)
+// 재기동: 세션 있을 때 viewbar에 표시
 function updateInputBar() {
   const ch = activeChannel();
   const alive = !!(ch && ch.alive);
   const hasSession = !!activeSid;
   $interrupt?.classList.toggle('ec-hidden', !alive);
-  $('ec-send-btn')?.classList.toggle('ec-hidden', alive);
+  // send는 항상 표시 (never hidden)
   $restart?.classList.toggle('ec-hidden', !hasSession);
 }
 
