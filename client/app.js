@@ -79,7 +79,7 @@ const $dialogBody = $('ec-dialog-body');
 const $dialogCancel = $('ec-dialog-cancel');
 const $dialogSubmit = $('ec-dialog-submit');
 const $dialogClose = $('ec-dialog-close');
-const $newSessionBtn = $('ec-new-session-btn');
+const $newSessionBtn = null; // renderTabs()에서 동적 생성
 const $newSession = $('ec-newsession');
 const $newSessionClose = $('ec-newsession-close');
 const $newSessionCancel = $('ec-newsession-cancel');
@@ -219,7 +219,10 @@ function renderPermPill() {
     default: '기본', acceptEdits: '편집', auto: '자동',
     bypassPermissions: '우회', dontAsk: '무묻', plan: '계획', 'prompt-tool': '프롬프트',
   };
-  pill.textContent = labels[mode] || mode;
+  const lockIcon = mode === 'bypassPermissions'
+    ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><line x1="3" y1="3" x2="21" y2="21" stroke="currentColor" stroke-width="2.5"/></svg>`
+    : `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
+  pill.innerHTML = lockIcon;
   pill.dataset.mode = mode;
   pill.title = cfg.bypassEnabled
     ? '클릭: bypassPermissions ↔ default 토글 (재기동)'
@@ -229,16 +232,7 @@ function renderPermPill() {
 }
 
 $('ec-perm-pill')?.addEventListener('click', () => {
-  if (!cfg.bypassEnabled) return;
-  const ch = activeChannel();
-  if (!ch) return;
-  const sess = ecSessions.find(s => s.id === ch.sessionId);
-  const ctrl = parseControlsFromArgs(sess?.args);
-  const cur = ctrl.permissionPromptTool ? 'prompt-tool' : ctrl.permissionMode;
-  const target = cur === 'bypassPermissions' ? 'default' : 'bypassPermissions';
-  if (!confirm(`권한 모드 ${cur} → ${target} 로 변경 (재기동)?`)) return;
-  const newArgs = patchArgs(sess?.args || [], { permissionMode: target });
-  sendWs({ op: 'restart', id: ch.id, args: newArgs });
+  showPermModal();
 });
 
 // ── 상태 ──────────────────────────────────────────────────────────────────────
@@ -394,6 +388,14 @@ function onMsg(msg) {
     if (!$settings.classList.contains('ec-hidden')) renderHiddenSessions();
     return;
   }
+  if (op === 'tab_prefs') {
+    const incoming = msg.prefs || {};
+    // 서버 전체 prefs로 교체 (삭제된 항목도 반영)
+    for (const k of Object.keys(tabPrefs)) { if (!incoming[k]) delete tabPrefs[k]; }
+    Object.assign(tabPrefs, incoming);
+    renderTabs();
+    return;
+  }
   const ch = id != null ? [...channels.values()].find(c => c.id === id) : null;
   if (op === 'opened') {
     if (ch) { ch.alive = true; ch.claudeId = msg.info?.claudeId; }
@@ -405,11 +407,11 @@ function onMsg(msg) {
     ch.turns = msg.turns || [];
     ch.usage = msg.usage || ch.usage;
     if (ch.stalled && ch.turns.length) ch.stalled = null;  // 응답 재개 시 stalled/dismissed 해제
-    // pendingInputs 중 서버 turns에 매칭되는 항목 제거 (echo 도착)
+    // pendingInputs 중 서버 turns에 매칭되는 항목 제거 (echo 도착) + draft localStorage 삭제
     if (ch.pendingInputs?.length) {
-      ch.pendingInputs = ch.pendingInputs.filter(p =>
-        !ch.turns.some(t => t.type === 'human' && t.body === p.text)
-      );
+      const confirmed = ch.pendingInputs.filter(p => ch.turns.some(t => t.type === 'human' && t.body === p.text));
+      confirmed.forEach(p => { if (p.draftKey) localStorage.removeItem(p.draftKey); });
+      ch.pendingInputs = ch.pendingInputs.filter(p => !ch.turns.some(t => t.type === 'human' && t.body === p.text));
     }
     if (ch.sessionId === activeSid) { renderActive(); renderUsage(); }
     return;
@@ -511,26 +513,18 @@ function onMsg(msg) {
 }
 
 // ── 탭 ──────────────────────────────────────────────────────────────────────────
-// ── 탭 선호도 (pin / group / order) — localStorage 영속 ───────────────────────
-const TABPREFS_KEY = 'easyclaude.tabPrefs';
-const tabPrefs = (() => {
-  try { return JSON.parse(localStorage.getItem(TABPREFS_KEY) || '{}'); }
-  catch { return {}; }
-})();
-function saveTabPrefs() {
-  localStorage.setItem(TABPREFS_KEY, JSON.stringify(tabPrefs));
-}
+// ── 탭 선호도 (pin / group / order) — 서버 영속 ───────────────────────────────
+let tabPrefs = {};
 function getTabPref(sid) {
   return tabPrefs[sid] || {};
 }
 function setTabPref(sid, patch) {
   tabPrefs[sid] = { ...(tabPrefs[sid] || {}), ...patch };
-  // null 값은 제거
   for (const [k, v] of Object.entries(tabPrefs[sid])) {
     if (v === null || v === undefined || v === '') delete tabPrefs[sid][k];
   }
   if (!Object.keys(tabPrefs[sid]).length) delete tabPrefs[sid];
-  saveTabPrefs();
+  sendWs({ op: 'tab_pref', sessionId: sid, patch });
   renderTabs();
 }
 
@@ -550,6 +544,13 @@ function tabSortKey(s, prefs) {
 
 function renderTabs() {
   $tabs.innerHTML = '';
+  // 새 세션 버튼을 탭 목록 맨 위에 (ec-tabs 안)
+  const _newBtn = document.createElement('button');
+  _newBtn.id = 'ec-new-session-btn-tab';
+  _newBtn.className = 'ec-new-session-tab';
+  _newBtn.textContent = '＋ 새 세션';
+  _newBtn.addEventListener('click', showNewSessionModal);
+  $tabs.appendChild(_newBtn);
   // 1) 정렬: pin / group / label
   const sorted = [...ecSessions].sort((a, b) => {
     const ka = tabSortKey(a, tabPrefs);
@@ -589,11 +590,12 @@ function renderTabs() {
   }
   const ungrouped = groups.get('') || [];
   if (ungrouped.length) {
-    // 미분류 세션: 최근 활성화순 (tabPrefs.lastActive 기준, 없으면 세션 ID 역순)
+    // 미분류 세션: 마지막 턴 시각 기준 (서버 lastTurnAt, 없으면 세션 ID 역순)
     const ungroupedSorted = [...ungrouped].sort((a, b) => {
-      const ta = tabPrefs[a.id]?.lastActive || a.id;
-      const tb = tabPrefs[b.id]?.lastActive || b.id;
-      return tb.localeCompare(ta);
+      const ta = a.lastTurnAt || 0;
+      const tb = b.lastTurnAt || 0;
+      if (ta !== tb) return tb - ta;
+      return (b.id > a.id ? 1 : -1);
     });
     appendTabSection(pinned.length || groupNames.length ? T('unnamed_header') : null, ungroupedSorted, '__ungrouped__');
   }
@@ -617,53 +619,48 @@ function appendTabSection(headerLabel, items, groupKey) {
     if (isCollapsed) return;
   }
 
-  // 핀 또는 그룹 섹션이면 드래그 활성화
+  // 핀/그룹 섹션이면 핸들 드래그 활성화
   const isDraggable = groupKey === '__pinned__' || (groupKey !== '__ungrouped__' && groupKey);
 
   for (const s of items) {
     const el = createTabElement(s);
     if (isDraggable) {
-      el.draggable = true;
+      const handle = el.querySelector('.ec-tab-handle');
+      if (handle) handle.classList.remove('ec-hidden');
+      // 핸들 mousedown/touchstart → draggable 활성화
+      let dragReady = false;
+      handle?.addEventListener('mousedown', () => { dragReady = true; el.draggable = true; });
+      handle?.addEventListener('touchstart', () => { dragReady = true; el.draggable = true; }, { passive: true });
+      el.addEventListener('dragend', () => {
+        dragReady = false; el.draggable = false;
+        el.classList.remove('ec-tab-dragging');
+        document.querySelectorAll('.ec-tab-drag-over').forEach(t => t.classList.remove('ec-tab-drag-over'));
+      });
       el.addEventListener('dragstart', (e) => {
+        if (!dragReady) { e.preventDefault(); return; }
         e.dataTransfer.setData('text/plain', s.id);
         e.dataTransfer.effectAllowed = 'move';
         el.classList.add('ec-tab-dragging');
-      });
-      el.addEventListener('dragend', () => {
-        el.classList.remove('ec-tab-dragging');
-        document.querySelectorAll('.ec-tab-drag-over').forEach(t => t.classList.remove('ec-tab-drag-over'));
       });
       el.addEventListener('dragover', (e) => {
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         el.classList.add('ec-tab-drag-over');
       });
-      el.addEventListener('dragleave', () => {
-        el.classList.remove('ec-tab-drag-over');
-      });
+      el.addEventListener('dragleave', () => el.classList.remove('ec-tab-drag-over'));
       el.addEventListener('drop', (e) => {
         e.preventDefault();
         el.classList.remove('ec-tab-drag-over');
         const fromId = e.dataTransfer.getData('text/plain');
-        const toId = s.id;
-        if (fromId === toId) return;
-        if (groupKey === '__pinned__') {
-          // pinOrder 교환
-          const fromOrder = tabPrefs[fromId]?.pinOrder || 0;
-          const toOrder = tabPrefs[toId]?.pinOrder || 0;
-          tabPrefs[fromId] = { ...(tabPrefs[fromId] || {}), pinOrder: toOrder };
-          tabPrefs[toId] = { ...(tabPrefs[toId] || {}), pinOrder: fromOrder };
-          saveTabPrefs();
-          renderTabs();
-        } else {
-          // 그룹 내 순서: groupOrder 교환
-          const fromOrder = tabPrefs[fromId]?.groupOrder || 0;
-          const toOrder = tabPrefs[toId]?.groupOrder || 0;
-          tabPrefs[fromId] = { ...(tabPrefs[fromId] || {}), groupOrder: toOrder };
-          tabPrefs[toId] = { ...(tabPrefs[toId] || {}), groupOrder: fromOrder };
-          saveTabPrefs();
-          renderTabs();
-        }
+        if (fromId === s.id) return;
+        const orderKey = groupKey === '__pinned__' ? 'pinOrder' : 'groupOrder';
+        const fromOrder = tabPrefs[fromId]?.[orderKey] ?? 99999;
+        const toOrder   = tabPrefs[s.id]?.[orderKey] ?? 99999;
+        sendWs({ op: 'tab_pref', sessionId: fromId, patch: { [orderKey]: toOrder } });
+        sendWs({ op: 'tab_pref', sessionId: s.id,    patch: { [orderKey]: fromOrder } });
+        tabPrefs[fromId] = { ...(tabPrefs[fromId] || {}), [orderKey]: toOrder };
+        tabPrefs[s.id]   = { ...(tabPrefs[s.id]   || {}), [orderKey]: fromOrder };
+        renderTabs();
       });
     }
     $tabs.appendChild(el);
@@ -700,7 +697,8 @@ function createTabElement(s) {
   btn.innerHTML = `<span class="ec-dot"></span>` +
     `<span class="ec-tab-label">${esc(effectiveLabel(s))}</span>` +
     contextBtn +
-    `<span class="ec-tab-menu" title="옵션">⋮</span>`;
+    `<span class="ec-tab-menu" title="옵션">⋮</span>` +
+    `<span class="ec-tab-handle ec-hidden" title="순서 변경">⠿</span>`;
   btn.addEventListener('click', e => {
     if (e.target.classList.contains('ec-tab-ctx')) {
       e.stopPropagation();
@@ -773,9 +771,9 @@ function showTabMenu(s, anchor) {
       if (pref.group) {
         setTabPref(s.id, { group: null });
       } else {
-        const ans = prompt('그룹 이름:', '');
-        if (ans === null) { close(); return; }
-        setTabPref(s.id, { group: ans.trim() || null });
+        close();
+        showGroupModal(s);
+        return;
       }
     } else if (act === 'hide') {
       handleTabClose(s);
@@ -796,6 +794,115 @@ function showTabMenu(s, anchor) {
 }
 
 // adhoc 세션만 가능. config 파일 변경 없음.
+// ── 인라인 미니 모달 유틸 ──────────────────────────────────────────────────────
+function showMiniModal({ title, body, onClose }) {
+  const overlay = document.createElement('div');
+  overlay.className = 'ec-mini-modal-overlay';
+  overlay.innerHTML = `<div class="ec-mini-modal"><div class="ec-mini-modal-head"><span>${esc(title)}</span><button class="ec-icon-btn ec-mini-modal-close" aria-label="닫기">✕</button></div><div class="ec-mini-modal-body"></div></div>`;
+  const bodyEl = overlay.querySelector('.ec-mini-modal-body');
+  if (typeof body === 'string') bodyEl.innerHTML = body;
+  else bodyEl.appendChild(body);
+  overlay.querySelector('.ec-mini-modal-close').addEventListener('click', () => { overlay.remove(); onClose?.(); });
+  overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); onClose?.(); } });
+  document.body.appendChild(overlay);
+  return { overlay, bodyEl };
+}
+
+function showGroupModal(s) {
+  const existing = [...new Set(Object.values(tabPrefs).map(p => p.group).filter(Boolean))];
+  const frag = document.createElement('div');
+  frag.innerHTML = `
+    ${existing.length ? `<p style="font-size:12px;color:var(--text-2);margin-bottom:8px">기존 그룹 선택</p>
+    <div class="ec-group-modal-list">${existing.map(g => `<button class="ec-btn ec-group-pick" data-g="${esc(g)}">${esc(g)}</button>`).join('')}</div>
+    <hr style="border:0;border-top:1px solid var(--border);margin:10px 0">` : ''}
+    <p style="font-size:12px;color:var(--text-2);margin-bottom:6px">새 그룹 이름</p>
+    <div style="display:flex;gap:6px">
+      <input id="ec-group-input" type="text" placeholder="그룹 이름" style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px;background:var(--surface);color:var(--text)">
+      <button class="ec-btn ec-btn-primary" id="ec-group-confirm">확인</button>
+    </div>`;
+  const { overlay } = showMiniModal({ title: '그룹 배정 — ' + esc(effectiveLabel(s)), body: frag });
+  frag.querySelectorAll('.ec-group-pick').forEach(btn => {
+    btn.addEventListener('click', () => {
+      setTabPref(s.id, { group: btn.dataset.g });
+      overlay.remove();
+    });
+  });
+  const input = frag.querySelector('#ec-group-input');
+  frag.querySelector('#ec-group-confirm').addEventListener('click', () => {
+    const val = input.value.trim();
+    if (val) { setTabPref(s.id, { group: val }); overlay.remove(); }
+  });
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') frag.querySelector('#ec-group-confirm').click(); });
+  setTimeout(() => input.focus(), 50);
+}
+
+function showPermModal() {
+  const ch = activeChannel();
+  if (!ch) return;
+  const sess = ecSessions.find(s => s.id === ch.sessionId);
+  if (!sess) return;
+  const ctrl = parseControlsFromArgs(sess.args);
+  const cur = ctrl.permissionMode || 'default';
+  const PERMS = [
+    { value: 'default',            label: '기본',   desc: '각 도구 사용마다 확인' },
+    { value: 'acceptEdits',        label: '편집',   desc: '파일 편집은 자동, 나머지 확인' },
+    { value: 'auto',               label: '자동',   desc: '안전한 작업 자동 허용' },
+    { value: 'dontAsk',            label: '무묻',   desc: '모든 작업 자동 허용 (위험 낮음)' },
+    { value: 'bypassPermissions',  label: '우회',   desc: '모든 권한 우회 (위험)' },
+    { value: 'plan',               label: '계획',   desc: '작업 계획만 수립, 실행 안 함' },
+  ];
+  const frag = document.createElement('div');
+  frag.innerHTML = `<div class="ec-perm-list">${PERMS.map(p =>
+    `<button class="ec-perm-mode-btn${p.value === cur ? ' active' : ''}" data-perm="${p.value}">
+      <span class="ec-perm-mode-label">${p.label}</span>
+      <span class="ec-perm-mode-desc">${p.desc}</span>
+    </button>`
+  ).join('')}</div>
+  <p style="font-size:11px;color:var(--muted);margin-top:8px">변경 시 세션이 재기동됩니다.</p>`;
+  const { overlay } = showMiniModal({ title: '권한 모드 변경', body: frag });
+  frag.querySelectorAll('.ec-perm-mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next = btn.dataset.perm;
+      if (next === cur) { overlay.remove(); return; }
+      const newArgs = patchArgs(sess.args || [], { permissionMode: next });
+      sendWs({ op: 'restart', id: ch.id, args: newArgs });
+      overlay.remove();
+    });
+  });
+}
+
+function showModelModal() {
+  const ch = activeChannel();
+  if (!ch) return;
+  const sess = ecSessions.find(s => s.id === ch.sessionId);
+  if (!sess) return;
+  const ctrl = parseControlsFromArgs(sess?.args);
+  const cur = ctrl.model || '';
+  const MODELS = [
+    { label: 'Opus 4.7',        value: 'opus' },
+    { label: 'Opus 4.7 (1M)',   value: 'claude-opus-4-7' },
+    { label: 'Sonnet 4.6',      value: 'sonnet' },
+    { label: 'Sonnet 4.6 (1M)', value: 'claude-sonnet-4-6[1M]' },
+    { label: 'Haiku 4.5',       value: 'haiku' },
+  ];
+  const frag = document.createElement('div');
+  frag.innerHTML = `<div class="ec-perm-list">${MODELS.map(m =>
+    `<button class="ec-perm-mode-btn${cur === m.value ? ' active' : ''}" data-model="${m.value}">
+      <span class="ec-perm-mode-label">${m.label}</span>
+    </button>`
+  ).join('')}</div>
+  <p style="font-size:11px;color:var(--muted);margin-top:8px">변경 시 세션이 재기동됩니다.</p>`;
+  const { overlay } = showMiniModal({ title: '모델 변경', body: frag });
+  frag.querySelectorAll('.ec-perm-mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const model = btn.dataset.model;
+      if (model === cur) { overlay.remove(); return; }
+      sendWs({ op: 'model_toggle', id: ch.id, model });
+      overlay.remove();
+    });
+  });
+}
+
 function handleTabDelete(s) {
   if (!s.meta?.adhoc) {
     alert('config 세션은 "삭제"가 불가합니다.\n영구 삭제(purge)로 숨김 처리하세요.');
@@ -909,7 +1016,8 @@ function updateInputBar() {
 function activate(sessionId) {
   if (!channels.has(sessionId)) return;
   activeSid = sessionId;
-  lastActiveSid = sessionId;     // reconnect 후 자동 복귀용
+  lastActiveSid = sessionId;
+  sendWs({ op: 'ui_state', lastActiveSessionId: sessionId });
   const ch = channels.get(sessionId);
   const sess = ecSessions.find(x => x.id === sessionId);
   const label = (ch?.session?.customTitle) || ch?.label || sess?.label || sessionId;
@@ -918,6 +1026,8 @@ function activate(sessionId) {
   renderActive();
   renderUsage();
   renderPermPill();
+  const savedDraft = localStorage.getItem('ec-draft-' + sessionId);
+  if (savedDraft && !$input.value) $input.value = savedDraft;
   if (ch?.pendingDialog) showDialog(ch);
   else hideDialog();
   requestAnimationFrame(() => $input.focus());
@@ -1030,12 +1140,14 @@ const LABELS = {
   human:'You', assistant:'Claude',
   tool_call:'Tool', tool_out:'Result',
   thinking:'Thinking', channel:'IOA',
+  agent_input:'Agent 프롬프트',
   result:'Turn 종료', hook:'Hook', meta:'Meta', other:'기타',
 };
 const COLORS = {
   human:'var(--accent)', assistant:'var(--green)',
   tool_call:'#cba6f7', tool_out:'#f9e2af',
   thinking:'#74c7ec', channel:'#94e2d5',
+  agent_input:'#fab387',
   result:'var(--muted)', hook:'var(--muted)', meta:'var(--muted)', other:'var(--muted)',
 };
 // 기본 숨김 turn type — 디버그 모드에서만 표시
@@ -1242,7 +1354,7 @@ function renderHome() {
   const logoSlot = $('ec-home-logo');
   if (logoSlot && $('ec-logo')) logoSlot.innerHTML = $('ec-logo').innerHTML;
   // 액션
-  $('ec-home-new')?.addEventListener('click', () => $('ec-new-session-btn')?.click());
+  $('ec-home-new')?.addEventListener('click', () => showNewSessionModal());
   $('ec-home-open-nav')?.addEventListener('click', () => $nav?.classList.add('open'));
   $('ec-home-settings')?.addEventListener('click', () => $('ec-settings-btn')?.click());
   // 인증/overlay 상태
@@ -1316,6 +1428,7 @@ function renderActive() {
   // 발화 turn(human/assistant/channel)은 그대로 노출, 그 외 (tool_call/tool_out/thinking/result 등)는
   // 연속 구간을 하나의 <details> 그룹으로 묶음. 사용자가 한 스위치로 펼침/접힘.
   const SPOKEN_TURN_TYPES = new Set(['human', 'assistant', 'channel']);
+  // agent_input은 fold 안으로 — SPOKEN_TURN_TYPES에 포함 안 함
   const renderOneTurn = (t) => {
     const cls = `ec-turn ec-turn-${t.type}` + (t.is_error ? ' ec-error' : '');
     let labelText;
@@ -1326,11 +1439,18 @@ function renderActive() {
       labelText = sess ? effectiveLabel(sess) : 'Claude';
     } else if (t.type === 'meta' && t.eventType) {
       labelText = `${LABELS.meta} · ${t.eventType}`;
+    } else if (t.type === 'tool_call' && t.category === 'agent') {
+      const prompt = t.input?.prompt || t.input?.description || '';
+      const summary = prompt ? prompt.slice(0, 120) + (prompt.length > 120 ? '…' : '') : (t.tool_name || 'Agent');
+      labelText = `🤖 ${t.tool_name || 'Agent'}`;
+      const RENDERABLE = new Set(['human','assistant','channel','thinking','agent_input']);
+      const bodyHtml = `<div style="font-size:12px;color:var(--text-2);margin-bottom:4px">${esc(summary)}</div><details><summary style="font-size:11px;color:var(--muted);cursor:pointer">전체 프롬프트 보기</summary><pre style="margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:11px">${esc(t.body||'')}</pre></details>`;
+      return `<div class="${cls}"><div class="ec-turn-label" style="color:${COLORS[t.type]||'var(--muted)'}">${esc(labelText)}</div><div class="ec-turn-body ${t.type}">${bodyHtml}</div></div>`;
     } else {
       labelText = LABELS[t.type] || t.type;
     }
-    // assistant/human/channel은 마크다운 렌더링 대상; 나머지는 코드/원문 그대로
-    const RENDERABLE = new Set(['human','assistant','channel','thinking']);
+    // assistant/human/channel/agent_input은 마크다운 렌더링 대상; 나머지는 코드/원문 그대로
+    const RENDERABLE = new Set(['human','assistant','channel','thinking','agent_input']);
     const bodyHtml = RENDERABLE.has(t.type) ? ecRenderBody(t.body || '') : `<pre style="margin:0;white-space:pre-wrap;word-break:break-word">${esc(t.body||'')}</pre>`;
     return `<div class="${cls}"><div class="ec-turn-label" style="color:${COLORS[t.type]||'var(--muted)'}">${esc(labelText)}</div><div class="ec-turn-body ${t.type}">${bodyHtml}</div></div>`;
   };
@@ -1515,10 +1635,10 @@ function renderUsage() {
   // ctx: 마지막 turn의 실제 input (누적 아님) — stream-parser의 lastCtxInput
   const ctxTok = s.lastCtxInput || 0;
   const maxCtx = /\[1m\]/i.test(model) ? 1048576 : 200000;
-  const remainPct = ctxTok > 0 ? Math.max(0, Math.round((maxCtx - ctxTok) / maxCtx * 100)) : null;
-  const ctxStr = remainPct !== null ? ` · ctx ${remainPct}%` : '';
+  const usedPct = ctxTok > 0 ? Math.min(100, Math.round(ctxTok / maxCtx * 100)) : null;
+  const ctxStr = usedPct !== null ? ` · ctx ${usedPct}%` : '';
   const text = `${fmtTok(total)} tok${ctxStr}${mcp}`;
-  const title = `model: ${model}\nin: ${fmtNum(u.input)} / out: ${fmtNum(u.output)}\ncache_read: ${fmtNum(u.cache_read)} / cache_create: ${fmtNum(u.cache_creation)}\ntotal: ${fmtNum(total)} / ctx used: ${fmtNum(ctxTok)} / ctx remain: ${remainPct ?? '?'}%\n${(s.mcpServers||[]).map(m=>`${m.name}: ${m.status}`).join('\n')}`;
+  const title = `model: ${model}\nin: ${fmtNum(u.input)} / out: ${fmtNum(u.output)}\ncache_read: ${fmtNum(u.cache_read)} / cache_create: ${fmtNum(u.cache_creation)}\ntotal: ${fmtNum(total)} / ctx 사용: ${fmtNum(ctxTok)} / ${usedPct ?? '?'}% (최대 ${fmtNum(maxCtx)})\n${(s.mcpServers||[]).map(m=>`${m.name}: ${m.status}`).join('\n')}`;
   setBoth(text, title);
 }
 
@@ -1541,10 +1661,12 @@ function sendInput() {
       return;
     }
   }
+  const draftKey = 'ec-draft-' + ch.sessionId;
+  localStorage.setItem(draftKey, val);  // WS 실패 시 복구용 — echo 확인 후 삭제
   sendWs({ op:'input', id: ch.id, data: val });
   // optimistic 풍선 — echo 도착 전 즉시 표시
   ch.pendingInputs = ch.pendingInputs || [];
-  ch.pendingInputs.push({ text: val, sentAt: Date.now() });
+  ch.pendingInputs.push({ text: val, sentAt: Date.now(), draftKey });
   $input.value = '';
   autosize();
   hideAc();
@@ -1552,10 +1674,16 @@ function sendInput() {
   requestAnimationFrame(() => $input.focus());
 }
 function autosize() {
-  $input.style.height = 'auto';
-  // 2줄(56px) 이하면 그대로 두고, 그 이상 입력 시 scrollHeight 만큼 (최대 200px)
-  const target = Math.max(56, Math.min($input.scrollHeight, 200));
-  $input.style.height = target + 'px';
+  // 입력 필드 고정 높이 — CSS에서 height/min-height/max-height: 56px으로 고정됨
+  updateScrollBtnPos();
+}
+function updateScrollBtnPos() {
+  const ib = document.getElementById('ec-inputbar');
+  const sb = document.getElementById('ec-statusbar');
+  const ibH = ib ? ib.offsetHeight : 100;
+  const sbH = sb ? sb.offsetHeight : 28;
+  document.documentElement.style.setProperty('--inputbar-h', ibH + 'px');
+  document.documentElement.style.setProperty('--statusbar-h', sbH + 'px');
 }
 
 $send.addEventListener('click', sendInput);
@@ -1564,44 +1692,8 @@ $interrupt?.addEventListener('click', () => {
   if (!ch || !ch.alive) return;
   sendWs({ op: 'interrupt', id: ch.id });
 });
-$('ec-perm-toggle-btn')?.addEventListener('click', () => {
-  const ch = activeChannel();
-  if (!ch) return;
-  sendWs({ op: 'perm_toggle', id: ch.id });
-});
-$('ec-model-toggle-btn')?.addEventListener('click', (e) => {
-  const ch = activeChannel();
-  if (!ch) return;
-  // 기존 팝업 닫기
-  document.querySelectorAll('.ec-model-popup').forEach(el => el.remove());
-  const MODELS = [
-    { label: 'Opus 4.7',       value: 'opus' },
-    { label: 'Opus 4.7 (1M)',  value: 'claude-opus-4-7' },
-    { label: 'Sonnet 4.6',     value: 'sonnet' },
-    { label: 'Sonnet 4.6 (1M)',value: 'claude-sonnet-4-6[1M]' },
-    { label: 'Haiku 4.5',      value: 'haiku' },
-  ];
-  const popup = document.createElement('div');
-  popup.className = 'ec-model-popup';
-  popup.innerHTML = MODELS.map(m =>
-    `<button class="ec-model-popup-item" data-model="${esc(m.value)}">${esc(m.label)}</button>`
-  ).join('');
-  // 버튼 기준으로 위치
-  const btn = e.currentTarget;
-  const rect = btn.getBoundingClientRect();
-  popup.style.cssText = `position:fixed;top:${rect.bottom+4}px;left:${rect.left}px;z-index:300;`;
-  document.body.appendChild(popup);
-  popup.querySelectorAll('.ec-model-popup-item').forEach(item => {
-    item.addEventListener('click', () => {
-      const model = item.dataset.model;
-      sendWs({ op: 'model_toggle', id: ch.id, model });
-      popup.remove();
-    });
-  });
-  // 외부 클릭 시 닫기
-  const close = (ev) => { if (!popup.contains(ev.target) && ev.target !== btn) { popup.remove(); document.removeEventListener('click', close, true); } };
-  setTimeout(() => document.addEventListener('click', close, true), 0);
-});
+$('ec-perm-toggle-btn')?.addEventListener('click', () => showPermModal());
+$('ec-model-toggle-btn')?.addEventListener('click', () => showModelModal());
 // 대화창 위 스크롤 → history 더 로드 (in-place 무한 스크롤)
 const $scrollBottom = $('ec-scroll-bottom');
 $parsed?.addEventListener('scroll', () => {
@@ -3127,5 +3219,9 @@ $('rs-q')?.addEventListener('input', scheduleSearch);
 // ── 시작 ──────────────────────────────────────────────────────────────────────
 applyCfg();
 loadClaudeOptions();
-renderActive();   // 첫 페이지 로드: activeSid=null → 홈 대시보드 즉시 표시
-connect();
+renderActive();
+updateScrollBtnPos();
+fetch('/api/initial-state').then(r => r.json()).then(data => {
+  if (data.tabPrefs) Object.assign(tabPrefs, data.tabPrefs);
+  if (data.lastActiveSessionId) lastActiveSid = data.lastActiveSessionId;
+}).catch(() => {}).finally(() => connect());

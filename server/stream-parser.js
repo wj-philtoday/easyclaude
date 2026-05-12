@@ -66,6 +66,7 @@ class StreamParser {
     };
     this.lastResult = null;
     this.pendingAssistant = null;
+    this.pendingAgentIds = new Set();  // Agent tool_use_id 추적 — 결과 전 user 텍스트 분류용
   }
 
   feedLine(line) {
@@ -169,10 +170,14 @@ class StreamParser {
             raw: channel.raw,
             ts, uuid,
           });
+        } else if (this.pendingAgentIds.size > 0) {
+          // Agent 실행 대기 중에 들어온 텍스트 — 서브에이전트 프롬프트 인젝션
+          this._addTurn({ type: 'agent_input', body: text, ts, uuid });
         } else {
           this._addTurn({ type: 'human', body: text, ts, uuid });
         }
       } else if (c.type === 'tool_result') {
+        this.pendingAgentIds.delete(c.tool_use_id);
         const body = this._stringifyContent(c.content);
         this._addTurn({
           type: 'tool_out',
@@ -198,6 +203,9 @@ class StreamParser {
         const inputStr = typeof c.input === 'string'
           ? c.input
           : JSON.stringify(c.input, null, 2);
+        if (c.name === 'Agent' || c.name === 'Task') {
+          this.pendingAgentIds.add(c.id);
+        }
         this._addTurn({
           type: 'tool_call',
           body: `${c.name}\n${inputStr}`,
@@ -274,7 +282,7 @@ class StreamParser {
     s.cache_creation += u.cache_creation_input_tokens || 0;
     s.cache_read += u.cache_read_input_tokens || 0;
     // 마지막 turn의 실제 ctx 사용량 (누적이 아닌 단일 turn)
-    const rawCtx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0);
+    const rawCtx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
     if (rawCtx > 0) this.session.lastCtxInput = rawCtx;
     this.h.onUsage && this.h.onUsage(this.session.usage);
   }

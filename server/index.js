@@ -473,7 +473,8 @@ function serializeForClient(s) {
       if (pid > 0) { try { process.kill(pid, 0); alive = true; } catch {} }
     } catch {}
   }
-  return { id: s.id, label: s.label, args: effectiveArgs(s), cwd: s.cwd, home: s.home, meta: s.meta, alive };
+  const lastTurnAt = sessionState[s.id]?.lastTurnAt || 0;
+  return { id: s.id, label: s.label, args: effectiveArgs(s), cwd: s.cwd, home: s.home, meta: s.meta, alive, lastTurnAt };
 }
 
 function broadcastSessions() {
@@ -884,6 +885,15 @@ const server = http.createServer((req, res) => {
   if (req.url === '/api/sessions') {
     res.writeHead(200,{'Content-Type':'application/json'});
     return res.end(JSON.stringify(sessions().map(s=>({id:s.id,label:s.label,meta:s.meta}))));
+  }
+
+  if (req.url === '/api/initial-state') {
+    res.writeHead(200, {'Content-Type':'application/json'});
+    return res.end(JSON.stringify({
+      sessions: sessions().map(serializeForClient),
+      tabPrefs: sessionState.__prefs || {},
+      lastActiveSessionId: sessionState.__ui?.lastActiveSessionId || null,
+    }));
   }
 
   // /api/sessions/history?cwd=&q=&limit=20 — claude jsonl 스캔
@@ -2012,6 +2022,12 @@ function spawnSession(sess) {
     ch.parser = new StreamParser({
       onTurn: (turn) => {
         ch.scheduleTurns();
+        // 마지막 턴 시각 기록 — 탭 정렬 기준
+        if (turn.type === 'human' || turn.type === 'assistant' || turn.type === 'result') {
+          sessionState[sess.id] = sessionState[sess.id] || {};
+          sessionState[sess.id].lastTurnAt = Date.now();
+          saveState(sessionState);
+        }
         // 현재 spawn의 parser가 만든 turn에서만 stalled 감지 — client-side 재감지 없음
         // assistant 타입은 제외: 응답 본문에 "rate limit" 등 단어가 포함되면 오탐 발생
         if (turn.type === 'result') {
@@ -2657,6 +2673,29 @@ wss.on('connection', ws => {
       nch.subscribers.get(ws).add(id);
       broadcastSessions();
       send({ op: 'restarted', id, claudeId: nch.claudeId, alive: nch.alive });
+      return;
+    }
+
+    if (op === 'tab_pref') {
+      const { sessionId, patch } = msg;
+      if (sessionId && patch) {
+        if (!sessionState.__prefs) sessionState.__prefs = {};
+        sessionState.__prefs[sessionId] = { ...(sessionState.__prefs[sessionId] || {}), ...patch };
+        for (const [k, v] of Object.entries(sessionState.__prefs[sessionId])) {
+          if (v === null || v === undefined) delete sessionState.__prefs[sessionId][k];
+        }
+        if (!Object.keys(sessionState.__prefs[sessionId]).length) delete sessionState.__prefs[sessionId];
+        saveState(sessionState);
+        const prefs = sessionState.__prefs;
+        wss.clients.forEach(c => { if (c.readyState === c.OPEN) c.send(JSON.stringify({ op: 'tab_prefs', prefs })); });
+      }
+      return;
+    }
+
+    if (op === 'ui_state') {
+      if (!sessionState.__ui) sessionState.__ui = {};
+      if (msg.lastActiveSessionId !== undefined) sessionState.__ui.lastActiveSessionId = msg.lastActiveSessionId;
+      saveState(sessionState);
       return;
     }
 

@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600&family=Noto+Sans+KR:wght@400;500;600&family=Noto+Sans+Mono:wght@400;500;600&display=swap">
-<link rel="stylesheet" href="style.css?v=1778573827">
+<link rel="stylesheet" href="style.css?v=1778592293">
 </head>
 <body class="ec-body">
 <div id="ec-shell">
@@ -19,7 +19,6 @@
       <span id="ec-title" class="ec-title">easyclaude</span>
       <button id="ec-ham" class="ec-icon-btn" aria-label="사이드바 토글">☰</button>
     </div>
-    <button id="ec-new-session-btn" class="ec-new-session-tab">＋ 새 세션</button>
     <div id="ec-tabs" class="ec-tabs"></div>
     <div class="ec-nav-footer">
       <button id="ec-settings-btn" class="ec-icon-btn ec-full">설정</button>
@@ -31,9 +30,6 @@
     <div id="ec-viewbar" class="ec-viewbar">
       <div class="ec-viewbar-left">
         <button id="ec-restart-btn" class="ec-vb-btn ec-hidden" title="세션 재기동 (재기동)" aria-label="세션 재기동">↻</button>
-        <button id="ec-perm-pill" class="ec-vb-btn" title="권한 모드 (재기동 필요)" aria-label="권한 모드"></button>
-        <button id="ec-perm-toggle-btn" class="ec-vb-btn ec-hidden" title="Shift+Tab inject — 권한 모드 순환 시도" aria-label="권한 전환">⇄</button>
-        <button id="ec-model-toggle-btn" class="ec-vb-btn ec-hidden" title="Alt+P inject — 모델 변경 시도" aria-label="모델 변경">M</button>
       </div>
       <div class="ec-viewbar-center">
         <span id="ec-active-label" class="ec-active-label"></span>
@@ -43,7 +39,9 @@
         </div>
       </div>
       <div class="ec-viewbar-right">
-        <span id="ec-viewbar-usage" class="ec-viewbar-usage"></span>
+        <button id="ec-perm-pill" class="ec-vb-btn" title="권한 모드" aria-label="권한 모드"></button>
+        <button id="ec-perm-toggle-btn" class="ec-vb-btn ec-hidden" title="권한 전환" aria-label="권한 전환">⇄</button>
+        <button id="ec-model-toggle-btn" class="ec-vb-btn ec-hidden" title="모델 변경" aria-label="모델 변경">M</button>
       </div>
     </div>
     <div id="ec-parsed-view" class="ec-parsed-view"></div>
@@ -68,6 +66,10 @@
             </svg>
           </button>
         </div>
+      </div>
+      <!-- statusline: 입력필드 아래, safe zone 겹쳐도 무방 -->
+      <div id="ec-statusbar" class="ec-statusbar">
+        <span id="ec-viewbar-usage" class="ec-viewbar-usage"></span>
       </div>
     </div>
   </main>
@@ -605,6 +607,6 @@ window.MathJax = {
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
 
-<script src="app.js?v=1778574621"></script>
+<script src="app.js?v=1778592293"></script>
 </body>
 </html>
