@@ -256,7 +256,11 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 
 /* ── Parsed view (turn 렌더) ──────────────────────────────────────────────── */
 .ec-parsed-view {
-  flex: 1; overflow-y: auto;
+  flex: 1 1 0;
+  min-height: 0;                          /* flex child의 overflow가 동작하도록 */
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;      /* iOS momentum scroll */
+  touch-action: pan-y;                    /* 모바일 가로 스와이프 제스처와 분리 */
   padding: 18px 22px 20px;
   display: flex; flex-direction: column; gap: 14px;
   font-size: var(--ec-font-size);
@@ -1141,6 +1145,7 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
 .ec-muted { color: var(--muted); font-size: 11px; }
 
 /* ── Welcome (no active session) ──────────────────────────────────────────── */
+.ec-welcome-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin: 10px 0 14px; }
 .ec-welcome {
   margin: auto;
   text-align: center;

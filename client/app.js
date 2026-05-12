@@ -224,10 +224,24 @@ function connect() {
   if (!window.__ec_visibility_hooked__) {
     window.__ec_visibility_hooked__ = true;
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && (!ws || ws.readyState !== WebSocket.OPEN)) {
-        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-        connect();
+      if (document.visibilityState === 'visible') {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+          connect();
+        }
+        // 활성 ch가 비어 보이면 history 강제 reload
+        const ch = activeSid ? channels.get(activeSid) : null;
+        if (ch && (!ch.turns || !ch.turns.length) && (!ch.histTurns || !ch.histTurns.length)) {
+          ch.histStart = -1;
+          loadMoreHistory(ch).then(() => {
+            if (ch.sessionId === activeSid) $parsed.scrollTop = $parsed.scrollHeight;
+          });
+        }
       }
+    });
+    // 모바일 BFCache 복귀: ws/channels 상태 보존 안 됨 → 페이지 reload로 안전 복구
+    window.addEventListener('pageshow', (e) => {
+      if (e.persisted) location.reload();
     });
   }
 }
@@ -512,7 +526,7 @@ function createTabElement(s) {
     (pinIcon ? `<span class="ec-tab-pin">${pinIcon}</span>` : '') +
     `<span class="ec-tab-label">${esc(s.label)}</span>` +
     `<span class="ec-tab-menu" title="옵션">⋮</span>` +
-    `<span class="ec-tab-x" title="${s.meta?.adhoc ? '영구 삭제' : '닫기'}">✕</span>`;
+    `<span class="ec-tab-x" title="${s.meta?.adhoc ? '제거 (jsonl 보존)' : '보관 (숨기기)'}">✕</span>`;
   btn.addEventListener('click', e => {
     if (e.target.classList.contains('ec-tab-x')) {
       e.stopPropagation();
@@ -537,8 +551,16 @@ function showTabMenu(s, anchor) {
   const isAdhoc = !!s.meta?.adhoc;
   const menu = document.createElement('div');
   menu.className = 'ec-tab-popup';
-  menu.style.left = rect.right + 'px';
-  menu.style.top = rect.top + 'px';
+  // 화면 밖 overflow 방지 — 우선 anchor 아래에 띄우고 viewport 안에 fit
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const menuW = 220, menuH = 260;
+  let left = Math.min(rect.left, vw - menuW - 8);
+  let top  = rect.bottom + 4;
+  if (top + menuH > vh - 8) top = Math.max(8, rect.top - menuH - 4);
+  if (left < 8) left = 8;
+  menu.style.left = left + 'px';
+  menu.style.top  = top + 'px';
+  menu.style.maxWidth = (vw - 16) + 'px';
   menu.innerHTML = `
     <button data-act="pin">${pref.pinned ? '📌 고정 해제' : '📌 고정'}</button>
     ${pref.pinned ? `<button data-act="pin-up">▲ 위로</button>
@@ -672,18 +694,20 @@ function forgetHiddenSession(sid) {
   saveHiddenStore(store);
 }
 
+// 탭 ✕: 보관(숨기기). cfg 세션 → hidden 플래그 set + 로컬 기억(복원 가능),
+// adhoc 세션 → 목록에서만 제거(jsonl 보존). purge(영구 삭제)는 ⋮ 메뉴에서만.
 function handleTabClose(s) {
-  const ch = channels.get(s.id);
-  const isAlive = ch && ch.alive;
   const isAdhoc = !!s.meta?.adhoc;
-  if (isAlive) {
-    if (!confirm(`'${s.label}'은 실행 중입니다. 강제로 영구 삭제할까요?\n(jsonl 파일까지 제거)`)) return;
+  const label = isAdhoc ? '제거' : '숨김';
+  if (!confirm(`'${s.label}' 탭을 ${label}할까요?\n(jsonl 보존 · 영구 삭제는 ⋮ 메뉴에서)`)) return;
+  if (!isAdhoc) {
+    rememberHiddenSession(s);
+    // server 측 cfg 세션의 purge_session = hidden 플래그 set (jsonl 보존)
+    sendWs({ op: 'purge_session', id: nextClientId++, sessionId: s.id });
   } else {
-    if (!confirm(`'${s.label}' 세션을 목록에서 영구 제거할까요?\n(jsonl 파일까지 제거)`)) return;
+    // adhoc — delete_session: 목록에서 제거, jsonl 보존
+    sendWs({ op: 'delete_session', id: nextClientId++, sessionId: s.id });
   }
-  // cfg 세션이면 향후 복원 가능 — 로컬에 기억
-  if (!isAdhoc) rememberHiddenSession(s);
-  sendWs({ op: 'purge_session', id: nextClientId++, sessionId: s.id });
 }
 
 function refreshTabState() {
@@ -957,17 +981,22 @@ function renderActive() {
       <div class="ec-welcome">
         <div class="ec-welcome-logo" id="ec-welcome-logo" aria-hidden="true"></div>
         <h2 class="ec-welcome-title">easyclaude</h2>
-        <p class="ec-welcome-sub">왼쪽 사이드바에서 세션을 선택하거나, <b>＋ 새 세션</b>으로 시작하세요.</p>
+        <p class="ec-welcome-sub">대화를 시작하려면 세션을 선택하거나 새로 만드세요.</p>
+        <div class="ec-welcome-actions">
+          <button type="button" class="ec-btn ec-btn-primary" id="ec-welcome-new">＋ 새 세션</button>
+          <button type="button" class="ec-btn" id="ec-welcome-open-nav">☰ 세션 목록 열기</button>
+        </div>
         <ul class="ec-welcome-tips">
-          <li><b>＋ 새 세션</b> — 작업 디렉터리 / 모델 / 권한 모드 등 선택해 spawn</li>
-          <li><b>기존 부활</b> — 과거 세션 검색해서 <code>--resume</code> 으로 부활</li>
-          <li><b>탭 ⋮</b> — 고정 / 그룹 / 재기동</li>
-          <li><b>ⓘ</b> — 활성 세션 정보 + 모델/권한 변경 (재기동)</li>
+          <li>📂 왼쪽 사이드바에서 기존 세션을 선택</li>
+          <li>↺ 기존 claude 대화 검색해 부활 가능</li>
+          <li>⚙ 설정에서 ec 환경(HOME overlay)·로그인·확장 관리</li>
+          <li>⌘/Ctrl + Enter — 전송 (메시지 박스에서)</li>
         </ul>
       </div>`;
-    // welcome 영역에 로고 inject
     const logoSlot = $('ec-welcome-logo');
     if (logoSlot && $('ec-logo')) logoSlot.innerHTML = $('ec-logo').innerHTML;
+    $('ec-welcome-new')?.addEventListener('click', () => $('ec-new-session-btn')?.click());
+    $('ec-welcome-open-nav')?.addEventListener('click', () => $nav?.classList.add('open'));
     return;
   }
   const ch = channels.get(activeSid);
