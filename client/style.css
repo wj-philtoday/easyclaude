@@ -313,8 +313,47 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: inher
   padding: 12px 16px;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: break-word;
+  min-width: 0;                              /* flex child overflow 차단 */
+  overflow-x: hidden;
   box-shadow: var(--shadow-1);
 }
+/* 마크다운 렌더링 시 내부 요소 */
+.ec-turn-body pre {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  overflow-x: auto;                          /* 코드블록은 가로 스크롤 */
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  margin: 8px 0;
+}
+.ec-turn-body code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--surface-2);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.ec-turn-body pre code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+}
+.ec-turn-body p { margin: 0 0 8px; }
+.ec-turn-body p:last-child { margin-bottom: 0; }
+.ec-turn-body ul, .ec-turn-body ol { margin: 4px 0 8px; padding-left: 20px; }
+.ec-turn-body li { margin: 2px 0; }
+.ec-turn-body h1,.ec-turn-body h2,.ec-turn-body h3 { margin: 10px 0 4px; font-size: 1em; font-weight: 700; }
+.ec-turn-body blockquote { border-left: 3px solid var(--border-strong); margin: 6px 0; padding: 4px 10px; color: var(--text-2); }
+.ec-turn-body table { border-collapse: collapse; width: 100%; margin: 8px 0; overflow-x: auto; display: block; }
+.ec-turn-body th, .ec-turn-body td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.ec-turn-body th { background: var(--surface-2); font-weight: 600; }
 
 /* turn 타입별 강조 (border-left + 색상) */
 .ec-turn-body.human       { border-left-color: var(--accent); background: linear-gradient(to right, color-mix(in srgb, var(--accent) 6%, var(--surface)) 0%, var(--surface) 100%); }
