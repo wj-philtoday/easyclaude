@@ -107,7 +107,15 @@ const cfg = Object.assign({
   locale: 'ko',               // 언어: ko | en
 }, (() => { try { return JSON.parse(localStorage.getItem(CFG_KEY) || '{}'); } catch { return {}; } })());
 
-function saveCfg() { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); applyCfg(); }
+function saveCfg() {
+  localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
+  applyCfg();
+  // 서버에도 동기화 (theme/locale/userName 등 브라우저 간 공유)
+  const syncFields = ['theme','themePreset','locale','userName','logoPreset','fontSize','bypassEnabled'];
+  const patch = {};
+  for (const k of syncFields) patch[k] = cfg[k];
+  sendWs({ op: 'set_cfg', cfg: patch });
+}
 
 const TITLE_DEFAULTS = {
   default:   'easyclaude',
@@ -341,8 +349,8 @@ function onMsg(msg) {
       if (store[s.id]) { delete store[s.id]; storeDirty = true; }
     }
     if (storeDirty) saveHiddenStore(store);
-    // 설정 패널이 열려있으면 hidden 섹션도 재렌더
     if (!$settings.classList.contains('ec-hidden')) renderHiddenSessions();
+    if (!activeSid) renderUsage(); // 홈 상태일 때 statusbar 메시지 표시
     renderTabs();
     // 홈 화면(activeSid 없음)이면 최근 세션 목록 갱신
     if (!activeSid) renderHome();
@@ -367,14 +375,13 @@ function onMsg(msg) {
   }
   if (op === 'session_deleted') {
     channels.delete(msg.sessionId);
-    if (activeSid === msg.sessionId) activeSid = null;
+    if (activeSid === msg.sessionId) { activeSid = null; renderUsage(); }
     refreshTabState();
     return;
   }
   if (op === 'session_purged') {
-    // 서버는 broadcastSessions 도 같이 보내지만 ack 도 따로 처리
     channels.delete(msg.sessionId);
-    if (activeSid === msg.sessionId) activeSid = null;
+    if (activeSid === msg.sessionId) { activeSid = null; renderUsage(); }
     if (!msg.hidden) {
       // adhoc 세션은 복원 불가 — store 에서도 제거
       forgetHiddenSession(msg.sessionId);
@@ -390,10 +397,24 @@ function onMsg(msg) {
   }
   if (op === 'tab_prefs') {
     const incoming = msg.prefs || {};
-    // 서버 전체 prefs로 교체 (삭제된 항목도 반영)
     for (const k of Object.keys(tabPrefs)) { if (!incoming[k]) delete tabPrefs[k]; }
     Object.assign(tabPrefs, incoming);
     renderTabs();
+    return;
+  }
+  if (op === 'ui_state') {
+    if (msg.lastActiveSessionId && !lastActiveSid) lastActiveSid = msg.lastActiveSessionId;
+    return;
+  }
+  if (op === 'ui_cfg') {
+    const serverCfg = msg.cfg || {};
+    let changed = false;
+    for (const k of Object.keys(serverCfg)) {
+      if (serverCfg[k] !== undefined && cfg[k] !== serverCfg[k]) {
+        cfg[k] = serverCfg[k]; changed = true;
+      }
+    }
+    if (changed) { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); applyCfg(); }
     return;
   }
   const ch = id != null ? [...channels.values()].find(c => c.id === id) : null;
@@ -630,11 +651,15 @@ function appendTabSection(headerLabel, items, groupKey) {
       // 핸들 mousedown/touchstart → draggable 활성화
       let dragReady = false;
       handle?.addEventListener('mousedown', () => { dragReady = true; el.draggable = true; });
-      handle?.addEventListener('touchstart', () => { dragReady = true; el.draggable = true; }, { passive: true });
+      handle?.addEventListener('touchstart', (e) => { e.preventDefault(); dragReady = true; el.draggable = true; }, { passive: false });
+      const clearDropIndicators = () => {
+        document.querySelectorAll('.ec-tab-drop-before,.ec-tab-drop-after')
+          .forEach(t => t.classList.remove('ec-tab-drop-before','ec-tab-drop-after'));
+      };
       el.addEventListener('dragend', () => {
         dragReady = false; el.draggable = false;
         el.classList.remove('ec-tab-dragging');
-        document.querySelectorAll('.ec-tab-drag-over').forEach(t => t.classList.remove('ec-tab-drag-over'));
+        clearDropIndicators();
       });
       el.addEventListener('dragstart', (e) => {
         if (!dragReady) { e.preventDefault(); return; }
@@ -645,21 +670,26 @@ function appendTabSection(headerLabel, items, groupKey) {
       el.addEventListener('dragover', (e) => {
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
-        el.classList.add('ec-tab-drag-over');
+        clearDropIndicators();
+        const mid = el.getBoundingClientRect().top + el.getBoundingClientRect().height / 2;
+        el.classList.add(e.clientY < mid ? 'ec-tab-drop-before' : 'ec-tab-drop-after');
       });
-      el.addEventListener('dragleave', () => el.classList.remove('ec-tab-drag-over'));
+      el.addEventListener('dragleave', clearDropIndicators);
       el.addEventListener('drop', (e) => {
         e.preventDefault();
-        el.classList.remove('ec-tab-drag-over');
+        const insertBefore = el.classList.contains('ec-tab-drop-before');
+        clearDropIndicators();
         const fromId = e.dataTransfer.getData('text/plain');
         if (fromId === s.id) return;
         const orderKey = groupKey === '__pinned__' ? 'pinOrder' : 'groupOrder';
-        const fromOrder = tabPrefs[fromId]?.[orderKey] ?? 99999;
-        const toOrder   = tabPrefs[s.id]?.[orderKey] ?? 99999;
-        sendWs({ op: 'tab_pref', sessionId: fromId, patch: { [orderKey]: toOrder } });
-        sendWs({ op: 'tab_pref', sessionId: s.id,    patch: { [orderKey]: fromOrder } });
-        tabPrefs[fromId] = { ...(tabPrefs[fromId] || {}), [orderKey]: toOrder };
-        tabPrefs[s.id]   = { ...(tabPrefs[s.id]   || {}), [orderKey]: fromOrder };
+        // 삽입 기반 reindex: fromId를 toId 앞/뒤에 삽입 후 전체 재인덱싱
+        const newOrder = items.map(i => i.id).filter(id => id !== fromId);
+        const targetIdx = newOrder.indexOf(s.id);
+        newOrder.splice(insertBefore ? targetIdx : targetIdx + 1, 0, fromId);
+        newOrder.forEach((id, idx) => {
+          tabPrefs[id] = { ...(tabPrefs[id] || {}), [orderKey]: idx };
+          sendWs({ op: 'tab_pref', sessionId: id, patch: { [orderKey]: idx } });
+        });
         renderTabs();
       });
     }
@@ -1405,10 +1435,10 @@ function renderActive() {
   }
   const ch = channels.get(activeSid);
   if (!ch) {
-    // 활성 세션 sid는 있으나 채널이 사라짐 (탭 닫힘/숨김 후) → 홈으로 복귀
     activeSid = null;
     if ($activeLabel) $activeLabel.textContent = '';
     renderActive();
+    renderUsage();
     return;
   }
   const allTurns = [...(ch.histTurns || []), ...(ch.turns || [])];
@@ -1610,13 +1640,65 @@ function fmtTok(n) {
   if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
   return String(n);
 }
+let _cachedHomeMsg = null;
+function _genHomeMsg() {
+  const h = new Date().getHours();
+  const period = h < 5 ? '새벽' : h < 9 ? '아침' : h < 12 ? '오전' : h < 14 ? '점심' : h < 18 ? '오후' : h < 22 ? '저녁' : '밤';
+  const pick = a => a[Math.floor(Math.random() * a.length)];
+  const subjects = ['Claude', '에이전트', '언어모델', '토큰', '파라미터', '어텐션 헤드', 'transformer'];
+  const adjs = ['졸린', '배고픈', '철학적인', '확률론적인', '창의적인', '수렴하는', '궁금한'];
+  const actions = ['다음 토큰을 예측 중', '컨텍스트를 소화 중', '어텐션을 집중 중', '추론을 진행 중', '가중치를 탐색 중', '손실을 최소화 중'];
+  const fulls = [
+    '확률의 바다에서 표류 중',
+    '컨텍스트 창이 맑습니다',
+    '다음 단어는 무엇일까요?',
+    '생각의 흐름을 타고 있습니다',
+    '한 번에 하나씩, 토큰',
+    '모든 단어가 가능성입니다',
+    '세계는 토큰으로 이루어져 있습니다',
+    '언어의 끝에서 시작됩니다',
+    '텍스트는 계속됩니다',
+    `생각이 많은 ${period}입니다`,
+    `${period}의 적막 속 추론 중`,
+    '지금 이 순간도 확률입니다',
+    '아직 아무 말도 하지 않았습니다',
+    '대화를 기다리고 있습니다',
+    `${period}의 언어 모델, 준비 완료`,
+    'hallucination 없는 하루를 기원합니다',
+    '컨텍스트를 비웠습니다. 신선합니다',
+  ];
+  const r = Math.random();
+  if (r < 0.25) return `${period}의 ${pick(subjects)}, ${pick(actions)}`;
+  if (r < 0.5)  return `${pick(adjs)} ${pick(subjects)}가 ${pick(actions)}`;
+  return pick(fulls);
+}
+function _setHomeStatus(text) {
+  if (!$viewbarUsage) return;
+  $viewbarUsage.innerHTML = '';
+  const span = document.createElement('span');
+  span.className = 'ec-home-status';
+  span.textContent = text;
+  $viewbarUsage.appendChild(span);
+  requestAnimationFrame(() => {
+    if (span.scrollWidth > $viewbarUsage.clientWidth + 2) {
+      span.textContent = text + '　　　' + text; // 이상적 공백 3칸 구분
+      span.classList.add('scrolling');
+    }
+  });
+}
+
 function renderUsage() {
   const ch = activeChannel();
   const setBoth = (text, title) => {
-    // $usage (actionbar)는 제거됨 — viewbar right에만 표시
     if ($viewbarUsage) { $viewbarUsage.textContent = text; if (title) $viewbarUsage.title = title; }
   };
-  if (!ch) { setBoth('', ''); return; }
+  if (!ch) {
+    if (!_cachedHomeMsg) _cachedHomeMsg = _genHomeMsg();
+    _setHomeStatus(_cachedHomeMsg);
+    return;
+  }
+  // 세션 활성화 시 다음 홈 복귀 때 새 문장이 나오도록 캐시 초기화
+  _cachedHomeMsg = null;
   const u = ch.usage;
   const s = ch.session || {};
   const model = s.model || '';
@@ -1629,8 +1711,12 @@ function renderUsage() {
     if (mcpBad) mcp += ` ✕${mcpBad}`;
     if (mcpAuth) mcp += ` ⚠${mcpAuth}`;
   }
-  if (!u) { setBoth(model + mcp, ''); return; }
+  const sess = ecSessions.find(x => x.id === ch.sessionId);
+  const fallback = model || (sess ? effectiveLabel(sess) : '');
+  if (!u) { setBoth(fallback + mcp, ''); return; }
   const total = (u.input || 0) + (u.output || 0) + (u.cache_read || 0);
+  const ctxTokEarly = s.lastCtxInput || 0;
+  if (!total && !ctxTokEarly) { setBoth(fallback + mcp, ''); return; }
   // ctx: 현재 컨텍스트 사용 토큰 (input + cache_read 누적)
   // ctx: 마지막 turn의 실제 input (누적 아님) — stream-parser의 lastCtxInput
   const ctxTok = s.lastCtxInput || 0;
@@ -2454,6 +2540,7 @@ function goHome() {
   if ($activeLabel) $activeLabel.textContent = '';
   refreshTabState();
   renderActive();
+  renderUsage();
   $nav?.classList.remove('open');
 }
 $('ec-title')?.addEventListener('click', goHome);
@@ -3220,8 +3307,11 @@ $('rs-q')?.addEventListener('input', scheduleSearch);
 applyCfg();
 loadClaudeOptions();
 renderActive();
+renderUsage();
 updateScrollBtnPos();
+// HTTP fetch: lastActiveSid 복원용 (tabPrefs/uiCfg는 WS list op에서 받으므로 보조용)
 fetch('/api/initial-state').then(r => r.json()).then(data => {
-  if (data.tabPrefs) Object.assign(tabPrefs, data.tabPrefs);
-  if (data.lastActiveSessionId) lastActiveSid = data.lastActiveSessionId;
+  if (data.lastActiveSessionId && !lastActiveSid) lastActiveSid = data.lastActiveSessionId;
+  // WS 연결 전에 먼저 적용 (빠른 초기 렌더용)
+  if (data.tabPrefs && !Object.keys(tabPrefs).length) Object.assign(tabPrefs, data.tabPrefs);
 }).catch(() => {}).finally(() => connect());

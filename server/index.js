@@ -893,6 +893,7 @@ const server = http.createServer((req, res) => {
       sessions: sessions().map(serializeForClient),
       tabPrefs: sessionState.__prefs || {},
       lastActiveSessionId: sessionState.__ui?.lastActiveSessionId || null,
+      uiCfg: sessionState.__cfg || {},
     }));
   }
 
@@ -2369,10 +2370,11 @@ wss.on('connection', ws => {
     const { op, id } = msg;
 
     if (op === 'list') {
-      return send({
-        op: 'sessions',
-        list: sessions().map(serializeForClient),
-      });
+      send({ op: 'sessions', list: sessions().map(serializeForClient) });
+      send({ op: 'tab_prefs', prefs: sessionState.__prefs || {} });
+      send({ op: 'ui_state', lastActiveSessionId: sessionState.__ui?.lastActiveSessionId || null });
+      if (sessionState.__cfg) send({ op: 'ui_cfg', cfg: sessionState.__cfg });
+      return;
     }
 
     if (op === 'create_session') {
@@ -2696,6 +2698,17 @@ wss.on('connection', ws => {
       if (!sessionState.__ui) sessionState.__ui = {};
       if (msg.lastActiveSessionId !== undefined) sessionState.__ui.lastActiveSessionId = msg.lastActiveSessionId;
       saveState(sessionState);
+      return;
+    }
+
+    if (op === 'set_cfg') {
+      if (msg.cfg && typeof msg.cfg === 'object') {
+        sessionState.__cfg = { ...(sessionState.__cfg || {}), ...msg.cfg };
+        saveState(sessionState);
+        // 다른 브라우저에도 즉시 동기화
+        const cfg = sessionState.__cfg;
+        wss.clients.forEach(c => { if (c !== ws && c.readyState === c.OPEN) c.send(JSON.stringify({ op: 'ui_cfg', cfg })); });
+      }
       return;
     }
 

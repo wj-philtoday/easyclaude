@@ -173,8 +173,8 @@ class StreamParser {
         } else if (this.pendingAgentIds.size > 0) {
           // Agent 실행 대기 중에 들어온 텍스트 — 서브에이전트 프롬프트 인젝션
           this._addTurn({ type: 'agent_input', body: text, ts, uuid });
-        } else if (/^---\s*\nname:\s*\S/.test(text) || /^<\?xml|^<!DOCTYPE/i.test(text)) {
-          // SKILL.md 또는 시스템 주입 컨텍스트 — meta로 분류 (기본 숨김)
+        } else if (/^Base directory for this skill:/i.test(text) || /^---\s*\nname:\s*\S/.test(text)) {
+          // SKILL.md 주입 컨텍스트 — meta로 분류 (기본 숨김)
           this._addTurn({ type: 'meta', body: text, raw: false, eventType: 'skill_injection', ts, uuid });
         } else {
           this._addTurn({ type: 'human', body: text, ts, uuid });

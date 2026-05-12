@@ -228,7 +228,7 @@ input[type=checkbox], input[type=radio] {
 .ec-tab.disconnected .ec-dot { background: var(--danger); }
 
 .ec-nav-footer { padding: 4px 10px; border-top: 1px solid var(--border); }
-.ec-nav-footer .ec-icon-btn { font-weight: 400; font-size: 11px; padding: 4px 8px; height: auto; }
+.ec-nav-footer .ec-icon-btn { font-weight: 600; font-size: 11px; padding: 4px 8px; height: auto; }
 /* 새 세션 탭 — 점선 박스, 탭 목록 맨 위 */
 .ec-new-session-tab {
   display: flex; align-items: center; justify-content: center;
@@ -1205,8 +1205,18 @@ input[type=checkbox], input[type=radio] {
 .ec-tab.active .ec-tab-ctx { opacity: 1; }
 .ec-tab-ctx:hover { color: var(--danger); }
 
-.ec-tab-dragging { opacity: 0.5; }
-.ec-tab-drag-over { background: var(--surface-2); outline: 1px dashed var(--accent-3); }
+.ec-tab-dragging { opacity: 0.4; }
+/* 삽입 위치 표시 선 */
+.ec-tab.ec-tab-drop-before { position: relative; }
+.ec-tab.ec-tab-drop-before::before {
+  content: ''; position: absolute; top: 0; left: 4px; right: 4px;
+  height: 2px; background: var(--accent); border-radius: 1px; pointer-events: none;
+}
+.ec-tab.ec-tab-drop-after { position: relative; }
+.ec-tab.ec-tab-drop-after::after {
+  content: ''; position: absolute; bottom: 0; left: 4px; right: 4px;
+  height: 2px; background: var(--accent); border-radius: 1px; pointer-events: none;
+}
 
 .ec-tab-group-header {
   display: flex; align-items: center; gap: 6px;
@@ -1705,6 +1715,8 @@ input[type=checkbox], input[type=radio] {
   padding: 0 2px;
   flex-shrink: 0;
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
   touch-action: none;
 }
 .ec-tab-handle:active { cursor: grabbing; }
@@ -1761,6 +1773,22 @@ input[type=checkbox], input[type=radio] {
   padding: 3px 12px 4px;
   min-height: 28px;
   background: var(--surface);
+  overflow: hidden;
+}
+/* 홈 상태 메시지 루프 스크롤 */
+.ec-home-status {
+  display: inline-block;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.ec-home-status.scrolling {
+  animation: ec-home-scroll 16s linear infinite;
+}
+@keyframes ec-home-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
 }
 /* Mobile: dialog panels — slash/jsonl 도 full-screen 처리 */
 @media (max-width: 720px) {
