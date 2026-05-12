@@ -2,7 +2,7 @@
 # easyclaude macOS .pkg 빌더 — Mac에서 실행
 #
 # 필요: Xcode Command Line Tools (pkgbuild, productbuild)
-# 순서: build-mac-app.sh → build-mac-icon.sh → build-mac-pkg.sh
+# 순서: build-mac-app.sh → (이 스크립트가 아이콘 빌드 포함) → .pkg 생성
 #
 # 설치 내용:
 #   /Applications/easyclaude.app
@@ -13,6 +13,10 @@ HERE="$(dirname "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")")"
 ROOT="$(dirname "$HERE")"
 DIST="$ROOT/dist"
 VERSION=$(node -e "console.log(require('$ROOT/package.json').version)" 2>/dev/null || echo "0.0.0")
+
+# 아이콘 빌드 (build-mac-icon.sh 통합)
+echo "[build-mac-pkg] 아이콘 빌드 중..."
+bash "$HERE/build-mac-icon.sh" || echo "[build-mac-pkg] 아이콘 빌드 실패 — 기본 아이콘으로 계속"
 
 # .app 찾기
 APP="$(find "$DIST" -maxdepth 3 -name 'easyclaude.app' -type d | head -1)"
