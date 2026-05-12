@@ -32,6 +32,10 @@ case "$CMD" in
     shift
     exec bash "$ROOT/scripts/build-mac-app.sh" "$@"
     ;;
+  build-mac-icon)
+    shift
+    exec bash "$ROOT/scripts/build-mac-icon.sh" "$@"
+    ;;
   tail)
     shift
     exec "$ROOT/bin/easyclaude-tail" "$@"
@@ -45,7 +49,8 @@ easyclaude — claude code 멀티 세션 워크벤치
   easyclaude install [opts]   설치 (sudo / --user / --no-systemd / --prefix)
   easyclaude update           git pull + npm install + 프로세스 재기동
   easyclaude restart          ec 서버만 재기동 (자식 claude는 supervisor가 살림)
-  easyclaude build-mac        macOS .app 번들 빌드 (dist/easyclaude.app + tar.gz)
+  easyclaude build-mac        macOS .app 번들 빌드 (node 번들 포함 + zip)
+  easyclaude build-mac-icon   macOS 아이콘 빌드 (mac에서 실행 — SVG→.icns)
   easyclaude tail <sid|uuid>  활성 세션 jsonl tail
   easyclaude help             이 도움말
 EOF
