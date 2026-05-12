@@ -975,32 +975,104 @@ function renderJsonlEntries(entries, prepend) {
 }
 */
 
+function renderHome() {
+  const totalSessions = ecSessions.length;
+  const liveCount = [...channels.values()].filter(c => c.alive).length;
+  $parsed.innerHTML = `
+    <div class="ec-home">
+      <div class="ec-home-hero">
+        <div class="ec-home-logo" id="ec-home-logo" aria-hidden="true"></div>
+        <h1 class="ec-home-title">easyclaude</h1>
+        <p class="ec-home-sub">claude code 멀티 세션 워크벤치</p>
+      </div>
+      <div class="ec-home-actions">
+        <button type="button" class="ec-btn ec-btn-primary ec-home-action" id="ec-home-new">＋ 새 세션</button>
+        <button type="button" class="ec-btn ec-home-action" id="ec-home-open-nav">☰ 세션 목록</button>
+        <button type="button" class="ec-btn ec-home-action" id="ec-home-settings">⚙ 설정</button>
+      </div>
+      <div class="ec-home-grid">
+        <div class="ec-home-card">
+          <div class="ec-home-card-label">세션</div>
+          <div class="ec-home-card-value">${totalSessions}</div>
+          <div class="ec-home-card-sub">활성 ${liveCount}</div>
+        </div>
+        <div class="ec-home-card" id="ec-home-auth">
+          <div class="ec-home-card-label">인증</div>
+          <div class="ec-home-card-value" id="ec-home-auth-state">⏳</div>
+          <div class="ec-home-card-sub" id="ec-home-auth-sub">조회 중…</div>
+        </div>
+        <div class="ec-home-card">
+          <div class="ec-home-card-label">overlay HOME</div>
+          <div class="ec-home-card-value" style="font-size:13px" id="ec-home-overlay">조회 중…</div>
+          <div class="ec-home-card-sub">ec 격리 환경</div>
+        </div>
+      </div>
+      <div class="ec-home-recent">
+        <h4>최근 세션</h4>
+        <div id="ec-home-recent-list" class="ec-home-list"></div>
+      </div>
+    </div>`;
+  // 로고 inject
+  const logoSlot = $('ec-home-logo');
+  if (logoSlot && $('ec-logo')) logoSlot.innerHTML = $('ec-logo').innerHTML;
+  // 액션
+  $('ec-home-new')?.addEventListener('click', () => $('ec-new-session-btn')?.click());
+  $('ec-home-open-nav')?.addEventListener('click', () => $nav?.classList.add('open'));
+  $('ec-home-settings')?.addEventListener('click', () => $('ec-settings-btn')?.click());
+  // 인증/overlay 상태
+  fetch(apiBase() + 'api/ec-home').then(r => r.json()).then(h => {
+    $('ec-home-overlay').textContent = h.overlayEnabled ? 'overlay ON' : 'real HOME';
+    $('ec-home-overlay').title = h.home || '';
+    return fetch(apiBase() + 'api/auth/status?home=' + encodeURIComponent(h.home));
+  }).then(r => r.json()).then(s => {
+    if (s.loggedIn) {
+      $('ec-home-auth-state').innerHTML = '<span style="color:var(--green)">●</span> 로그인';
+      $('ec-home-auth-sub').textContent = s.subscriptionType || s.authMethod || '';
+    } else {
+      $('ec-home-auth-state').innerHTML = '<span style="color:var(--warn)">○</span> 미로그인';
+      $('ec-home-auth-sub').textContent = '설정에서 로그인 진행';
+    }
+  }).catch(() => {});
+  // 최근 세션 카드
+  const recents = ecSessions.slice(0, 6);
+  const $rl = $('ec-home-recent-list');
+  if ($rl) {
+    if (!recents.length) {
+      $rl.innerHTML = '<div class="ec-empty">등록된 세션이 없습니다. <b>＋ 새 세션</b>으로 시작하세요.</div>';
+    } else {
+      $rl.innerHTML = recents.map(s => {
+        const ch = channels.get(s.id);
+        const alive = ch && ch.alive;
+        return `<button type="button" class="ec-home-session" data-sid="${esc(s.id)}">
+          <span class="ec-home-session-dot" style="background:${alive ? 'var(--green)' : 'var(--muted)'}"></span>
+          <span class="ec-home-session-label">${esc(s.label || s.id)}</span>
+          <span class="ec-home-session-cwd">${esc(s.cwd || '')}</span>
+        </button>`;
+      }).join('');
+      $rl.querySelectorAll('.ec-home-session').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const sid = btn.dataset.sid;
+          if (!channels.has(sid)) openSession(sid);
+          activate(sid);
+        });
+      });
+    }
+  }
+}
+
 function renderActive() {
   if (!activeSid) {
-    $parsed.innerHTML = `
-      <div class="ec-welcome">
-        <div class="ec-welcome-logo" id="ec-welcome-logo" aria-hidden="true"></div>
-        <h2 class="ec-welcome-title">easyclaude</h2>
-        <p class="ec-welcome-sub">대화를 시작하려면 세션을 선택하거나 새로 만드세요.</p>
-        <div class="ec-welcome-actions">
-          <button type="button" class="ec-btn ec-btn-primary" id="ec-welcome-new">＋ 새 세션</button>
-          <button type="button" class="ec-btn" id="ec-welcome-open-nav">☰ 세션 목록 열기</button>
-        </div>
-        <ul class="ec-welcome-tips">
-          <li>📂 왼쪽 사이드바에서 기존 세션을 선택</li>
-          <li>↺ 기존 claude 대화 검색해 부활 가능</li>
-          <li>⚙ 설정에서 ec 환경(HOME overlay)·로그인·확장 관리</li>
-          <li>⌘/Ctrl + Enter — 전송 (메시지 박스에서)</li>
-        </ul>
-      </div>`;
-    const logoSlot = $('ec-welcome-logo');
-    if (logoSlot && $('ec-logo')) logoSlot.innerHTML = $('ec-logo').innerHTML;
-    $('ec-welcome-new')?.addEventListener('click', () => $('ec-new-session-btn')?.click());
-    $('ec-welcome-open-nav')?.addEventListener('click', () => $nav?.classList.add('open'));
+    renderHome();
     return;
   }
   const ch = channels.get(activeSid);
-  if (!ch) { $parsed.innerHTML = ''; return; }
+  if (!ch) {
+    // 활성 세션 sid는 있으나 채널이 사라짐 (탭 닫힘/숨김 후) → 홈으로 복귀
+    activeSid = null;
+    if ($activeLabel) $activeLabel.textContent = '';
+    renderActive();
+    return;
+  }
   const allTurns = [...(ch.histTurns || []), ...(ch.turns || [])];
   // Auth/리밋 stalled 감지 — turn body에 키워드 검출 (claude code가 assistant/result로 emit하는 텍스트)
   if (!ch.stalled) {
@@ -1929,6 +2001,19 @@ $('exe-delete')?.addEventListener('click', async () => {
 });
 
 $('ec-info-btn')?.addEventListener('click', openInfoPanel);
+
+// 상단 타이틀/로고 클릭 → 홈으로 (활성 세션 해제)
+function goHome() {
+  activeSid = null;
+  if ($activeLabel) $activeLabel.textContent = '';
+  refreshTabState();
+  renderActive();
+  $nav?.classList.remove('open');
+}
+$('ec-title')?.addEventListener('click', goHome);
+$('ec-title')?.style && ($('ec-title').style.cursor = 'pointer');
+$('ec-logo')?.addEventListener('click', goHome);
+$('ec-logo')?.style && ($('ec-logo').style.cursor = 'pointer');
 $('info-close')?.addEventListener('click', () => $('ec-info').classList.add('ec-hidden'));
 $('info-cancel')?.addEventListener('click', () => $('ec-info').classList.add('ec-hidden'));
 $('info-restart-apply')?.addEventListener('click', () => {
