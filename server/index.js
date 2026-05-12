@@ -46,6 +46,41 @@ function homesForSession(sess) {
   return [sess?.home, overlayEnabled ? overlayHome : null, process.env.HOME].filter(Boolean);
 }
 
+// scope·kind 별 설정 파일 경로 결정 — claude code의 실제 저장 위치에 맞춤.
+// mcp:
+//   user    → <HOME>/.claude.json (root.mcpServers)
+//   project → <cwd>/.mcp.json (root.mcpServers)
+//   local   → <cwd>/.claude/settings.local.json (root.mcpServers)
+// plugin:
+//   user    → <HOME>/.claude.json (root.plugins / enabledPlugins)
+//   project/local → <cwd>/.claude/settings.json / settings.local.json (root.plugins)
+// skill (디렉토리 기반):
+//   user/project/local 각 scope dir 의 skills/
+function resolveScopeFile(scope, kind, cwd, ovHome) {
+  if (kind === 'skill') {
+    const dir = (
+      scope === 'user' ? path.join(ovHome, '.claude') :
+      scope === 'project' && cwd ? path.join(cwd, '.claude') :
+      scope === 'local' && cwd ? path.join(cwd, '.claude') :
+      null
+    );
+    return dir ? { dir, file: null } : null;
+  }
+  if (kind === 'mcp') {
+    if (scope === 'user')    return { file: path.join(ovHome, '.claude.json'), key: 'mcpServers' };
+    if (scope === 'project' && cwd) return { file: path.join(cwd, '.mcp.json'), key: 'mcpServers' };
+    if (scope === 'local' && cwd)   return { file: path.join(cwd, '.claude', 'settings.local.json'), key: 'mcpServers' };
+    return null;
+  }
+  if (kind === 'plugin') {
+    if (scope === 'user')    return { file: path.join(ovHome, '.claude.json'), key: 'plugins' };
+    if (scope === 'project' && cwd) return { file: path.join(cwd, '.claude', 'settings.json'), key: 'plugins' };
+    if (scope === 'local' && cwd)   return { file: path.join(cwd, '.claude', 'settings.local.json'), key: 'plugins' };
+    return null;
+  }
+  return null;
+}
+
 // jsonl → turns 캐시 (대화창 위 스크롤 history용)
 const _jsonlTurnsCache = new Map(); // jsonlPath → { mtime, turns }
 function jsonlToTurns(jsonlPath) {
@@ -204,6 +239,26 @@ function ensureOverlayHome(realHome) {
     if (fs.existsSync(realProjects)) {
       try { fs.symlinkSync(realProjects, ovProjects, 'dir'); }
       catch (e) { console.error(`[easyclaude] projects symlink fail: ${e.message}`); }
+    }
+  }
+
+  // 5) overlay .claude.json — real HOME의 .claude.json에서 user-scope 설정 머지 (mcpServers/플러그인 등).
+  //    overlay에 .claude.json이 없을 때만 시드. 이후엔 ec/사용자가 직접 관리.
+  const ovClaudeJson = path.join(ovDir, '.claude.json');
+  const realClaudeJson = path.join(realHome, '.claude.json');
+  if (!fs.existsSync(ovClaudeJson) && fs.existsSync(realClaudeJson)) {
+    try {
+      const real = JSON.parse(fs.readFileSync(realClaudeJson, 'utf8'));
+      // 사용자 scope에 해당하는 필드만 시드 — cache/onboarding 등은 overlay 자체 생성.
+      const seed = {};
+      const carry = ['mcpServers', 'enabledPlugins', 'disabledPlugins', 'plugins', 'enabledMcpjsonServers', 'disabledMcpjsonServers', 'enableAllProjectMcpServers'];
+      for (const k of carry) if (real[k] != null) seed[k] = real[k];
+      if (Object.keys(seed).length) {
+        fs.writeFileSync(ovClaudeJson, JSON.stringify(seed, null, 2), { mode: 0o600 });
+        console.log(`[easyclaude] overlay .claude.json seeded with ${Object.keys(seed).join(',')}`);
+      }
+    } catch (e) {
+      console.error(`[easyclaude] overlay .claude.json seed fail: ${e.message}`);
     }
   }
 
@@ -807,57 +862,72 @@ const server = http.createServer((req, res) => {
       scopes.push({ scope: 'project', file: path.join(cwd, '.claude', 'settings.json'), dir: path.join(cwd, '.claude') });
       scopes.push({ scope: 'local',   file: path.join(cwd, '.claude', 'settings.local.json'), dir: path.join(cwd, '.claude') });
     }
-    const out = { mcp: [], plugins: [], skills: [], scopes: scopes.map(s => ({ scope: s.scope, file: s.file })) };
-    for (const sc of scopes) {
-      let s = {};
-      try { s = JSON.parse(fs.readFileSync(sc.file, 'utf8')); } catch {}
-      // mcpServers
-      const servers = (s && typeof s.mcpServers === 'object') ? s.mcpServers : {};
-      const disabledList = Array.isArray(s.disabledMcpjsonServers) ? s.disabledMcpjsonServers : [];
-      const enabledList  = Array.isArray(s.enabledMcpjsonServers)  ? s.enabledMcpjsonServers  : null;
-      for (const [name, config] of Object.entries(servers)) {
-        const enabled = enabledList ? enabledList.includes(name) : !disabledList.includes(name);
-        out.mcp.push({ scope: sc.scope, file: sc.file, name, enabled, config });
+    const out = { mcp: [], plugins: [], skills: [] };
+    const scopeNames = ['user'].concat(cwd ? ['project', 'local'] : []);
+
+    const readJson = (p) => {
+      try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return {}; }
+    };
+
+    for (const scope of scopeNames) {
+      // ---- MCP ----
+      const mcpLoc = resolveScopeFile(scope, 'mcp', cwd, ovHome);
+      if (mcpLoc?.file) {
+        const j = readJson(mcpLoc.file);
+        const servers = (j && typeof j[mcpLoc.key] === 'object') ? j[mcpLoc.key] : {};
+        // disabled list는 settings.json 쪽에만 있음 — scope settings.json도 보조 읽기
+        const sFile = scope === 'user' ? path.join(ovHome, '.claude', 'settings.json') :
+                       scope === 'project' && cwd ? path.join(cwd, '.claude', 'settings.json') :
+                       scope === 'local' && cwd   ? path.join(cwd, '.claude', 'settings.local.json') : null;
+        const s = sFile ? readJson(sFile) : {};
+        const disabledList = Array.isArray(s.disabledMcpjsonServers) ? s.disabledMcpjsonServers : [];
+        const enabledList  = Array.isArray(s.enabledMcpjsonServers)  ? s.enabledMcpjsonServers  : null;
+        for (const [name, config] of Object.entries(servers)) {
+          const enabled = enabledList ? enabledList.includes(name) : !disabledList.includes(name);
+          out.mcp.push({ scope, file: mcpLoc.file, name, enabled, config });
+        }
       }
-      // plugins (claude code v2 — 정확한 schema 미확정, generic 처리)
-      const plugins = (s && typeof s.plugins === 'object') ? s.plugins : {};
-      for (const [name, p] of Object.entries(plugins)) {
-        const enabled = !(p && p.enabled === false);
-        out.plugins.push({ scope: sc.scope, file: sc.file, name, enabled, config: p });
-      }
-      const enabledPluginList = Array.isArray(s.enabledPlugins) ? s.enabledPlugins : null;
-      if (enabledPluginList) {
-        for (const name of enabledPluginList) {
-          if (!out.plugins.find(p => p.scope === sc.scope && p.name === name)) {
-            out.plugins.push({ scope: sc.scope, file: sc.file, name, enabled: true, config: null });
+      // ---- Plugin ----
+      const plgLoc = resolveScopeFile(scope, 'plugin', cwd, ovHome);
+      if (plgLoc?.file) {
+        const j = readJson(plgLoc.file);
+        const plugins = (j && typeof j.plugins === 'object') ? j.plugins : {};
+        for (const [name, p] of Object.entries(plugins)) {
+          out.plugins.push({ scope, file: plgLoc.file, name, enabled: !(p && p.enabled === false), config: p });
+        }
+        const enabledPluginList = Array.isArray(j.enabledPlugins) ? j.enabledPlugins : null;
+        if (enabledPluginList) {
+          for (const name of enabledPluginList) {
+            if (!out.plugins.find(p => p.scope === scope && p.name === name)) {
+              out.plugins.push({ scope, file: plgLoc.file, name, enabled: true, config: null });
+            }
           }
         }
       }
-      // skills — 디렉토리 기반
-      const skillsDir = path.join(sc.dir, 'skills');
-      const disabledSkills = Array.isArray(s.disabledSkills) ? s.disabledSkills : [];
-      if (fs.existsSync(skillsDir)) {
-        try {
-          for (const sd of fs.readdirSync(skillsDir)) {
-            const skillPath = path.join(skillsDir, sd);
-            let stat;
-            try { stat = fs.lstatSync(skillPath); } catch { continue; }
-            // 디렉토리 또는 디렉토리 심볼릭이 SKILL.md 포함하면 skill로 인정
-            let isSkillDir = false;
-            try {
-              const target = stat.isSymbolicLink() ? fs.statSync(skillPath) : stat;
-              if (target.isDirectory() && fs.existsSync(path.join(skillPath, 'SKILL.md'))) isSkillDir = true;
-            } catch {}
-            if (!isSkillDir) continue;
-            out.skills.push({
-              scope: sc.scope,
-              dir: skillPath,
-              name: sd,
-              enabled: !disabledSkills.includes(sd),
-              symlink: stat.isSymbolicLink(),
-            });
-          }
-        } catch {}
+      // ---- Skill ----
+      const skLoc = resolveScopeFile(scope, 'skill', cwd, ovHome);
+      if (skLoc?.dir) {
+        const skillsDir = path.join(skLoc.dir, 'skills');
+        const sFile = scope === 'user' ? path.join(ovHome, '.claude', 'settings.json') :
+                       scope === 'project' && cwd ? path.join(cwd, '.claude', 'settings.json') :
+                       scope === 'local' && cwd   ? path.join(cwd, '.claude', 'settings.local.json') : null;
+        const s = sFile ? readJson(sFile) : {};
+        const disabledSkills = Array.isArray(s.disabledSkills) ? s.disabledSkills : [];
+        if (fs.existsSync(skillsDir)) {
+          try {
+            for (const sd of fs.readdirSync(skillsDir)) {
+              const skillPath = path.join(skillsDir, sd);
+              let stat; try { stat = fs.lstatSync(skillPath); } catch { continue; }
+              let isSkillDir = false;
+              try {
+                const target = stat.isSymbolicLink() ? fs.statSync(skillPath) : stat;
+                if (target.isDirectory() && fs.existsSync(path.join(skillPath, 'SKILL.md'))) isSkillDir = true;
+              } catch {}
+              if (!isSkillDir) continue;
+              out.skills.push({ scope, dir: skillPath, name: sd, enabled: !disabledSkills.includes(sd), symlink: stat.isSymbolicLink() });
+            }
+          } catch {}
+        }
       }
     }
     res.writeHead(200, {'Content-Type':'application/json'});
@@ -879,34 +949,24 @@ const server = http.createServer((req, res) => {
       catch { return process.env.HOME; }
     })();
     const cwd = sess?.cwd || null;
-    const file = (
-      scope === 'user' ? path.join(ovHome, '.claude', 'settings.json') :
-      scope === 'project' && cwd ? path.join(cwd, '.claude', 'settings.json') :
-      scope === 'local' && cwd ? path.join(cwd, '.claude', 'settings.local.json') :
-      null
-    );
-    const scopeDir = file ? path.dirname(file) : null;
+    const loc = resolveScopeFile(scope, kind, cwd, ovHome);
+    if (!loc) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope/kind/cwd' })); }
     if (kind === 'skill') {
-      if (!scopeDir) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope' })); }
-      const skillPath = path.join(scopeDir, 'skills', name, 'SKILL.md');
+      const skillPath = path.join(loc.dir, 'skills', name, 'SKILL.md');
       let content = '';
       try { content = fs.readFileSync(skillPath, 'utf8'); }
       catch (e) { res.writeHead(404, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'skill not found', path: skillPath })); }
       res.writeHead(200, {'Content-Type':'application/json'});
       return res.end(JSON.stringify({ ok: true, kind, scope, name, path: skillPath, content }));
     }
-    // mcp / plugin
-    if (!file) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope' })); }
     let s = {};
-    try { s = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {}; } catch (e) {
+    try { s = fs.existsSync(loc.file) ? JSON.parse(fs.readFileSync(loc.file, 'utf8')) : {}; } catch (e) {
       res.writeHead(500, {'Content-Type':'application/json'});
       return res.end(JSON.stringify({ error: 'parse fail: ' + e.message }));
     }
-    let config = null;
-    if (kind === 'mcp') config = (s.mcpServers || {})[name] || null;
-    else if (kind === 'plugin') config = (s.plugins || {})[name] || null;
+    const config = (s && typeof s[loc.key] === 'object') ? s[loc.key][name] || null : null;
     res.writeHead(200, {'Content-Type':'application/json'});
-    return res.end(JSON.stringify({ ok: true, kind, scope, name, file, config }));
+    return res.end(JSON.stringify({ ok: true, kind, scope, name, file: loc.file, config }));
   }
 
   // /api/scoped/extension/save  POST {sid, scope, kind, name, config, oldName?}
@@ -929,28 +989,19 @@ const server = http.createServer((req, res) => {
         catch { return process.env.HOME; }
       })();
       const cwd = sess?.cwd || null;
-      const file = (
-        scope === 'user' ? path.join(ovHome, '.claude', 'settings.json') :
-        scope === 'project' && cwd ? path.join(cwd, '.claude', 'settings.json') :
-        scope === 'local' && cwd ? path.join(cwd, '.claude', 'settings.local.json') :
-        null
-      );
-      const scopeDir = file ? path.dirname(file) : null;
+      const loc = resolveScopeFile(scope, kind, cwd, ovHome);
+      if (!loc) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope/kind/cwd' })); }
       if (kind === 'skill') {
-        if (!scopeDir) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope' })); }
         if (!/^[A-Za-z0-9_.-]+$/.test(name)) {
           res.writeHead(400, {'Content-Type':'application/json'});
           return res.end(JSON.stringify({ error: 'skill name must match [A-Za-z0-9_.-]+' }));
         }
-        const skillDir = path.join(scopeDir, 'skills', name);
+        const skillDir = path.join(loc.dir, 'skills', name);
         const skillPath = path.join(skillDir, 'SKILL.md');
         try {
-          // rename 케이스
           if (oldName && oldName !== name) {
-            const oldDir = path.join(scopeDir, 'skills', oldName);
-            if (fs.existsSync(oldDir) && !fs.existsSync(skillDir)) {
-              fs.renameSync(oldDir, skillDir);
-            }
+            const oldDir = path.join(loc.dir, 'skills', oldName);
+            if (fs.existsSync(oldDir) && !fs.existsSync(skillDir)) fs.renameSync(oldDir, skillDir);
           }
           ensureDir(skillDir);
           fs.writeFileSync(skillPath, String(config ?? ''));
@@ -961,28 +1012,23 @@ const server = http.createServer((req, res) => {
           return res.end(JSON.stringify({ error: e.message }));
         }
       }
-      // mcp / plugin
-      if (!file) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope' })); }
       let s = {};
-      try { s = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {}; } catch (e) {
+      try { s = fs.existsSync(loc.file) ? JSON.parse(fs.readFileSync(loc.file, 'utf8')) : {}; } catch (e) {
         res.writeHead(500, {'Content-Type':'application/json'});
         return res.end(JSON.stringify({ error: 'parse fail: ' + e.message }));
       }
-      const objKey = kind === 'mcp' ? 'mcpServers' : 'plugins';
-      s[objKey] = (s[objKey] && typeof s[objKey] === 'object') ? s[objKey] : {};
-      if (oldName && oldName !== name && s[objKey][oldName] != null) {
-        delete s[objKey][oldName];
-      }
+      s[loc.key] = (s[loc.key] && typeof s[loc.key] === 'object') ? s[loc.key] : {};
+      if (oldName && oldName !== name && s[loc.key][oldName] != null) delete s[loc.key][oldName];
       if (config == null || typeof config !== 'object') {
         res.writeHead(400, {'Content-Type':'application/json'});
         return res.end(JSON.stringify({ error: 'config object required for mcp/plugin' }));
       }
-      s[objKey][name] = config;
+      s[loc.key][name] = config;
       try {
-        ensureDir(path.dirname(file));
-        fs.writeFileSync(file, JSON.stringify(s, null, 2));
+        ensureDir(path.dirname(loc.file));
+        fs.writeFileSync(loc.file, JSON.stringify(s, null, 2));
         res.writeHead(200, {'Content-Type':'application/json'});
-        return res.end(JSON.stringify({ ok: true, file, hint: '활성 세션에 적용하려면 재기동 또는 /mcp 명령 필요' }));
+        return res.end(JSON.stringify({ ok: true, file: loc.file, hint: '활성 세션에 적용하려면 재기동 또는 /mcp 명령 필요' }));
       } catch (e) {
         res.writeHead(500, {'Content-Type':'application/json'});
         return res.end(JSON.stringify({ error: e.message }));
@@ -1007,24 +1053,14 @@ const server = http.createServer((req, res) => {
         catch { return process.env.HOME; }
       })();
       const cwd = sess?.cwd || null;
-      const file = (
-        scope === 'user' ? path.join(ovHome, '.claude', 'settings.json') :
-        scope === 'project' && cwd ? path.join(cwd, '.claude', 'settings.json') :
-        scope === 'local' && cwd ? path.join(cwd, '.claude', 'settings.local.json') :
-        null
-      );
-      const scopeDir = file ? path.dirname(file) : null;
+      const loc = resolveScopeFile(scope, kind, cwd, ovHome);
+      if (!loc) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope/kind/cwd' })); }
       if (kind === 'skill') {
-        if (!scopeDir) { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope' })); }
-        const skillDir = path.join(scopeDir, 'skills', name);
+        const skillDir = path.join(loc.dir, 'skills', name);
         try {
-          let stat;
-          try { stat = fs.lstatSync(skillDir); } catch { stat = null; }
-          if (stat && stat.isSymbolicLink()) {
-            fs.unlinkSync(skillDir);
-          } else if (stat) {
-            fs.rmSync(skillDir, { recursive: true, force: true });
-          }
+          let stat; try { stat = fs.lstatSync(skillDir); } catch { stat = null; }
+          if (stat && stat.isSymbolicLink()) fs.unlinkSync(skillDir);
+          else if (stat) fs.rmSync(skillDir, { recursive: true, force: true });
           res.writeHead(200, {'Content-Type':'application/json'});
           return res.end(JSON.stringify({ ok: true }));
         } catch (e) {
@@ -1032,23 +1068,20 @@ const server = http.createServer((req, res) => {
           return res.end(JSON.stringify({ error: e.message }));
         }
       }
-      if (!file || !fs.existsSync(file)) {
+      if (!fs.existsSync(loc.file)) {
         res.writeHead(200, {'Content-Type':'application/json'});
-        return res.end(JSON.stringify({ ok: true, hint: 'file not present, nothing to delete' }));
+        return res.end(JSON.stringify({ ok: true, hint: 'file not present' }));
       }
       let s = {};
-      try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) {
+      try { s = JSON.parse(fs.readFileSync(loc.file, 'utf8')); } catch (e) {
         res.writeHead(500, {'Content-Type':'application/json'});
         return res.end(JSON.stringify({ error: 'parse fail: ' + e.message }));
       }
-      const objKey = kind === 'mcp' ? 'mcpServers' : 'plugins';
-      if (s[objKey] && s[objKey][name] != null) {
-        delete s[objKey][name];
-      }
+      if (s[loc.key] && s[loc.key][name] != null) delete s[loc.key][name];
       try {
-        fs.writeFileSync(file, JSON.stringify(s, null, 2));
+        fs.writeFileSync(loc.file, JSON.stringify(s, null, 2));
         res.writeHead(200, {'Content-Type':'application/json'});
-        return res.end(JSON.stringify({ ok: true, file }));
+        return res.end(JSON.stringify({ ok: true, file: loc.file }));
       } catch (e) {
         res.writeHead(500, {'Content-Type':'application/json'});
         return res.end(JSON.stringify({ error: e.message }));
