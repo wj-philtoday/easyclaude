@@ -867,8 +867,10 @@ const server = http.createServer((req, res) => {
         return res.end(JSON.stringify({ error: 'no active auth process for this home — start login/setup-token first' }));
       }
       try {
-        // PTY 안 readline은 raw/cooked 둘 다 가능 — \r과 \n 모두 보내 enter 확실히 트리거.
-        state.proc.stdin.write(code.trim() + '\r\n');
+        // PTY raw mode에서 \r 단독이 정답 (검증: claude setup-token이 \r에 즉시
+        // 코드 처리, "OAuth error: Invalid code" 또는 "Token saved"로 응답).
+        // \r\n 보내면 enter 두 번 처리되어 retry 트리거 → URL 재발급으로 보임.
+        state.proc.stdin.write(code.trim() + '\r');
         res.writeHead(200, {'Content-Type':'application/json'});
         return res.end(JSON.stringify({ ok: true, hint: '폴링으로 status 확인' }));
       } catch (e) {
