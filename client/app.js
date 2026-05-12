@@ -1101,15 +1101,35 @@ function renderActive() {
   const hiddenBanner = hiddenCount > 0
     ? `<div class="ec-hidden-banner" id="ec-hidden-banner">메타/훅 이벤트 ${hiddenCount}개 숨김 — <a href="#" id="ec-show-debug">디버그 표시</a></div>`
     : '';
-  const turnsHtml = visible.map(t => {
+  // 발화 turn(human/assistant/channel)은 그대로 노출, 그 외 (tool_call/tool_out/thinking/result 등)는
+  // 연속 구간을 하나의 <details> 그룹으로 묶음. 사용자가 한 스위치로 펼침/접힘.
+  const SPOKEN_TURN_TYPES = new Set(['human', 'assistant', 'channel']);
+  const renderOneTurn = (t) => {
     const cls = `ec-turn ec-turn-${t.type}` + (t.is_error ? ' ec-error' : '');
     const labelText = (t.type === 'meta' && t.eventType) ? `${LABELS.meta} · ${t.eventType}` : (LABELS[t.type] || t.type);
-    return `
-      <div class="${cls}">
-        <div class="ec-turn-label" style="color:${COLORS[t.type]||'var(--muted)'}">${esc(labelText)}</div>
-        <div class="ec-turn-body ${t.type}">${esc(t.body)}</div>
-      </div>`;
-  }).join('');
+    return `<div class="${cls}"><div class="ec-turn-label" style="color:${COLORS[t.type]||'var(--muted)'}">${esc(labelText)}</div><div class="ec-turn-body ${t.type}">${esc(t.body)}</div></div>`;
+  };
+  let turnsHtml = '';
+  let foldBuf = [];
+  const flushFold = () => {
+    if (!foldBuf.length) return '';
+    const n = foldBuf.length;
+    const counts = {};
+    for (const t of foldBuf) counts[t.type] = (counts[t.type] || 0) + 1;
+    const summary = Object.entries(counts).map(([k,v]) => `${LABELS[k]||k}${v>1?' ×'+v:''}`).join(' · ');
+    const inner = foldBuf.map(renderOneTurn).join('');
+    foldBuf = [];
+    return `<details class="ec-turn-fold"><summary>▸ ${esc(summary)} <span class="ec-muted">(${n})</span></summary>${inner}</details>`;
+  };
+  for (const t of visible) {
+    if (SPOKEN_TURN_TYPES.has(t.type)) {
+      turnsHtml += flushFold();
+      turnsHtml += renderOneTurn(t);
+    } else {
+      foldBuf.push(t);
+    }
+  }
+  turnsHtml += flushFold();
   const pendingHtml = pending.map(p => `
     <div class="ec-turn ec-turn-human ec-turn-pending">
       <div class="ec-turn-label" style="color:${COLORS.human}">You · 전송 중…</div>

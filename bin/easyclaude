@@ -1,10 +1,48 @@
 #!/usr/bin/env bash
-# easyclaude entrypoint
-#   환경변수:
-#     EASYCLAUDE_CONFIG  config.json 절대경로 (없으면 XDG → /etc 순)
-#     EASYCLAUDE_STATE   state.json 절대경로
-#     PORT, HOST         서버 listen
+# easyclaude — claude code 멀티 세션 워크벤치
+#
+# 서브커맨드:
+#   easyclaude [run]            서버 실행 (기본)
+#   easyclaude install [opts]   설치 (sudo / --user / --no-systemd / --prefix)
+#   easyclaude update           git pull + npm install + 프로세스 재기동
+#   easyclaude tail <sid|uuid>  활성 세션 jsonl tail
+#   easyclaude help             이 도움말
 set -e
 HERE="$(dirname "$(readlink -f "$0")")"
 ROOT="$(dirname "$HERE")"
-exec node "$ROOT/server/index.js" "$@"
+CMD="${1:-run}"
+
+case "$CMD" in
+  run|'')
+    exec node "$ROOT/server/index.js" "${@:2}"
+    ;;
+  install)
+    shift
+    exec bash "$ROOT/install.sh" "$@"
+    ;;
+  update)
+    shift
+    exec bash "$ROOT/scripts/update.sh" "$@"
+    ;;
+  tail)
+    shift
+    exec "$ROOT/bin/easyclaude-tail" "$@"
+    ;;
+  help|--help|-h)
+    cat <<'EOF'
+easyclaude — claude code 멀티 세션 워크벤치
+
+사용:
+  easyclaude [run]            서버 실행 (기본)
+  easyclaude install [opts]   설치 (sudo / --user / --no-systemd / --prefix)
+  easyclaude update           git pull + npm install + 프로세스 재기동
+  easyclaude tail <sid|uuid>  활성 세션 jsonl tail
+  easyclaude help             이 도움말
+EOF
+    ;;
+  *)
+    echo "unknown subcommand: $CMD" >&2
+    echo "easyclaude help — 도움말" >&2
+    exit 2
+    ;;
+esac
