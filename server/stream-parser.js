@@ -196,6 +196,12 @@ class StreamParser {
   _onAssistant(evt) {
     const msg = evt.message;
     if (!msg) return;
+    // msg.usage = 이 API 호출의 실제 input 크기 (누적 아님, 컴팩션 반영됨)
+    if (msg.usage) {
+      const u = msg.usage;
+      const rawCtx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      if (rawCtx > 0) this.session.lastCtxInput = rawCtx;
+    }
     const contents = Array.isArray(msg.content) ? msg.content : [];
     const ts = evt.timestamp || null;
     const uuid = evt.uuid || null;
@@ -284,9 +290,7 @@ class StreamParser {
     s.output += u.output_tokens || 0;
     s.cache_creation += u.cache_creation_input_tokens || 0;
     s.cache_read += u.cache_read_input_tokens || 0;
-    // 마지막 turn의 실제 ctx 사용량 (누적이 아닌 단일 turn)
-    const rawCtx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
-    if (rawCtx > 0) this.session.lastCtxInput = rawCtx;
+    // lastCtxInput은 _onAssistant에서 per-API-call 기준으로 업데이트
     this.h.onUsage && this.h.onUsage(this.session.usage);
   }
 
