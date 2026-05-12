@@ -2,7 +2,7 @@
 # easyclaude macOS .app 번들 빌더 (node.js 번들 포함 — zero-dependency)
 #
 # 출력: dist/easyclaude-mac-v<ver>.zip
-#   easyclaude.app          ← 앱 (node 22 LTS arm64/x64 번들)
+#   easyclaude.app          ← 앱 (node 22 LTS arm64 번들)
 #   시작하기.command          ← 더블클릭 → quarantine 제거 + 앱 실행
 #   README.txt
 #
@@ -18,7 +18,6 @@ MACOS="$APP/Contents/MacOS"
 
 NODE_VERSION="${EC_NODE_VERSION:-v22.22.2}"
 NODE_URL_ARM="https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-darwin-arm64.tar.gz"
-NODE_URL_X64="https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-darwin-x64.tar.gz"
 NODE_CACHE="$DIST/.node-cache"
 
 VERSION=$(node -e "console.log(require('$ROOT/package.json').version)" 2>/dev/null || echo "0.0.0")
@@ -27,7 +26,7 @@ echo "[build-mac] easyclaude v$VERSION — Node.js $NODE_VERSION 번들"
 echo "[build-mac] target: $APP"
 
 rm -rf "$APP"
-mkdir -p "$MACOS" "$RES/app" "$RES/node-arm64" "$RES/node-x64" "$NODE_CACHE"
+mkdir -p "$MACOS" "$RES/app" "$RES/node-arm64" "$NODE_CACHE"
 
 # 1) node 다운로드 + 압축 해제 (캐시 사용)
 download_node() {
@@ -68,7 +67,6 @@ download_node() {
 }
 
 download_node "$NODE_URL_ARM" "arm64"
-download_node "$NODE_URL_X64" "x64"
 
 # 2) ec 소스 복사
 echo "[build-mac] copying ec sources..."
@@ -114,13 +112,7 @@ mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/server.log"
 PID_FILE="$LOG_DIR/server.pid"
 
-# 번들된 node 선택 (arch 기반)
-ARCH="$(uname -m)"
-if [ "$ARCH" = "arm64" ]; then
-  NODE="$RES/node-arm64/bin/node"
-else
-  NODE="$RES/node-x64/bin/node"
-fi
+NODE="$RES/node-arm64/bin/node"
 if [ ! -x "$NODE" ]; then
   # fallback: 시스템 node
   for p in "$(command -v node 2>/dev/null)" /opt/homebrew/bin/node /usr/local/bin/node; do
