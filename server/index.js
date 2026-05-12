@@ -50,15 +50,33 @@ function spawnClaudePty(args, env) {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 }
-const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[=>NOP\\\(\)\*\+]|\x1b\[\?[0-9;]+[hl]/g;
-function stripAnsi(s) { return String(s).replace(ANSI_RE, ''); }
+// ANSI escape strip — cursor forward (CUF)는 공백으로 변환해야 단어 경계가 보존됨.
+// 그렇지 않으면 "Paste code here if prompted" 같이 공백으로 위치 표현된 텍스트가 한 단어로 붙어 URL 정규식이 흡수.
+function stripAnsi(s) {
+  s = String(s);
+  // CUF: \x1b[<n>C → n개 공백 (기본 1)
+  s = s.replace(/\x1b\[(\d*)C/g, (_, n) => ' '.repeat(Math.min(200, parseInt(n || '1', 10))));
+  // OSC sequences (\x1b]...BEL or \x1b\)
+  s = s.replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '');
+  // CSI ?...[hl] (mode set/reset)
+  s = s.replace(/\x1b\[\?[0-9;]+[hl]/g, '');
+  // 나머지 CSI (SGR, cursor move 등) — 그냥 제거
+  s = s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  // ESC singletons
+  s = s.replace(/\x1b[=>NOP\\\(\)\*\+]/g, '');
+  // C0 제어문자 (NUL/BS/SO/SI/DEL 등, TAB/LF/CR 제외)
+  s = s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+  return s;
+}
 
 // PTY 80-col wrap된 OAuth URL 재조립용. claude code의 URL은 보통 한 줄에 ~80 char로 잘려
 // 줄바꿈이 끼어서 출력됨. 매칭 전에 모든 whitespace를 제거한 사본에서 URL 추출.
 // claude OAuth URL — PTY 80-col wrap 재조립.
-// 같은 https://...로 시작하는 줄을 찾고, 그 뒤 줄들이 url-safe char로만 구성되면 합쳐 본 URL 완성.
-const OAUTH_LINE_RE = /(https:\/\/(?:claude\.com|console\.anthropic\.com|platform\.claude\.com)\/\S*)/;
+// PTY redraw 중복 + 단어 사이 공백 보존(CUF→공백) 가정.
+const OAUTH_LINE_RE = /(https:\/\/(?:claude\.com|console\.anthropic\.com|platform\.claude\.com)\/[^\s]*)/;
+// 다음 줄이 URL-safe char만으로 구성되어야 합침 (공백 포함되면 stop)
 const OAUTH_CONT_RE = /^[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+$/;
+// state 파라미터는 base64url 안 char셋 — 보통 길이가 일정. 너무 긴 매칭은 redraw 중복 의심.
 function tryCaptureOAuthUrl(state) {
   if (state.url) return;
   const raw = stripAnsi((state.output || '') + (state.error || ''));
@@ -70,10 +88,19 @@ function tryCaptureOAuthUrl(state) {
     for (let j = i + 1; j < lines.length; j++) {
       const next = (lines[j] || '').trim();
       if (!next) break;                    // 빈 줄 만나면 URL 끝
-      if (!OAUTH_CONT_RE.test(next)) break; // URL-safe char 외 만나면 끝 (예: 'Paste code...')
+      if (!OAUTH_CONT_RE.test(next)) break; // 공백/기타 char 만나면 끝
       url += next;
     }
-    if (url.length > 50) { state.url = url; return; }
+    if (url.length < 50) continue;
+    // PTY redraw로 같은 URL이 두 번 emit되면 state= 파라미터가 중복될 수 있음.
+    // state=<value>가 두 번 나오면 첫 번째까지만 잘라냄.
+    const stateMatches = [...url.matchAll(/[?&]state=([^&]*)/g)];
+    if (stateMatches.length >= 2) {
+      const secondIdx = stateMatches[1].index;
+      url = url.slice(0, secondIdx);
+    }
+    state.url = url;
+    return;
   }
 }
 
@@ -840,7 +867,8 @@ const server = http.createServer((req, res) => {
         return res.end(JSON.stringify({ error: 'no active auth process for this home — start login/setup-token first' }));
       }
       try {
-        state.proc.stdin.write(code.trim() + '\n');
+        // PTY 안 readline은 raw/cooked 둘 다 가능 — \r과 \n 모두 보내 enter 확실히 트리거.
+        state.proc.stdin.write(code.trim() + '\r\n');
         res.writeHead(200, {'Content-Type':'application/json'});
         return res.end(JSON.stringify({ ok: true, hint: '폴링으로 status 확인' }));
       } catch (e) {
