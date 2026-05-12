@@ -396,8 +396,26 @@ function normalizeSession(s) {
 function sessions() {
   const fromCfg = (cfg.sessions || []).map(normalizeSession);
   const fromRt  = [...runtimeSessions.values()].map(normalizeSession);
-  const all = [...fromCfg, ...fromRt].filter(s => !sessionState[s.id]?.hidden);
-  // sessionState[id].labelOverride 가 있으면 우선 적용
+  // state.json 에 영속된 ad-hoc 세션 복원 (cfg/runtime에 없고 hidden이 아닌 항목 중
+  // label/cwd 메타가 있는 것)
+  const known = new Set([...fromCfg.map(s => s.id), ...fromRt.map(s => s.id)]);
+  const fromState = [];
+  for (const [sid, st] of Object.entries(sessionState || {})) {
+    if (known.has(sid) || st.hidden) continue;
+    if (!st.cwd) continue;        // 단순 claudeId 항목은 skip
+    fromState.push(normalizeSession({
+      id: sid,
+      label: st.label || sid,
+      cwd: st.cwd,
+      name: st.name || st.label || sid,
+      args: Array.isArray(st.args) ? st.args : [],
+      home: st.home || null,
+      meta: { ...(st.meta || {}), adhoc: true, restored: true },
+    }));
+    runtimeSessions.set(sid, fromState[fromState.length - 1]);   // 이번 프로세스 동안 메모리에도 등록
+  }
+  const all = [...fromCfg, ...fromRt, ...fromState].filter(s => !sessionState[s.id]?.hidden);
+  // sessionState[id].labelOverride 우선 적용
   return all.map(s => {
     const override = sessionState[s.id]?.labelOverride;
     if (override) return { ...s, label: override };
@@ -2115,7 +2133,14 @@ wss.on('connection', ws => {
         meta: { adhoc: true },
       });
       runtimeSessions.set(newId, sess);
-      // 모든 연결 클라이언트에 새 sessions 목록 broadcast
+      // state.json 에 메타 영속화 — 재기동 후 복원
+      sessionState[newId] = {
+        ...(sessionState[newId] || {}),
+        label, cwd, name: sess.name, args: sess.args, home: sess.home,
+        meta: sess.meta,
+        createdAt: sessionState[newId]?.createdAt || new Date().toISOString(),
+      };
+      saveState(sessionState);
       broadcastSessions();
       return send({ op: 'session_created', id, sessionId: newId });
     }
@@ -2208,9 +2233,11 @@ wss.on('connection', ws => {
         meta: { adhoc: true, resumed: true, fromClaudeId: claudeId },
       });
       runtimeSessions.set(newId, sess);
-      // sessionState 에 claudeId 미리 설정 → spawn 시 --resume 사용
+      // sessionState 에 claudeId + 메타 영속화 → 재기동 후 복원 + spawn 시 --resume
       sessionState[newId] = {
-        claudeId, name: sess.name, cwd: sess.cwd,
+        claudeId,
+        label: sess.label, cwd: sess.cwd, name: sess.name,
+        args: sess.args, home: sess.home, meta: sess.meta,
         createdAt: new Date().toISOString(),
         resumedFrom: claudeId,
       };
