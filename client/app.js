@@ -1581,9 +1581,9 @@ async function wireStalledBanner(ch) {
     } catch {}
   });
   $('stalled-restart')?.addEventListener('click', () => {
-    sendWs({ op: 'restart_session', id: nextClientId++, sessionId: ch.sessionId });
     ch.stalled = null;
     renderActive();
+    sendWs({ op: 'restart', id: ch.id });
   });
   $('stalled-wait')?.addEventListener('click', () => {
     const saved = ch.stalled;
