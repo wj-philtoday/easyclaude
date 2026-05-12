@@ -1147,10 +1147,12 @@ function renderActive() {
     return;
   }
   const allTurns = [...(ch.histTurns || []), ...(ch.turns || [])];
-  // Auth/리밋 stalled 감지 — turn body에 키워드 검출 (claude code가 assistant/result로 emit하는 텍스트)
+  // Auth/리밋 stalled 감지 — live turns(ch.turns)의 최근 30개만 검사.
+  // histTurns는 오래된 기록이라 여기서 감지하면 계정 전환 후에도 배너가 계속 노출됨.
   if (!ch.stalled) {
-    for (let i = allTurns.length - 1; i >= Math.max(0, allTurns.length - 30); i--) {
-      const t = allTurns[i];
+    const liveTurns = ch.turns || [];
+    for (let i = liveTurns.length - 1; i >= Math.max(0, liveTurns.length - 30); i--) {
+      const t = liveTurns[i];
       const b = typeof t?.body === 'string' ? t.body : '';
       if (!b) continue;
       if (/not logged in|please run \/login|please log in|run \/login|invalid api key|api key not found/i.test(b)) {
@@ -1227,15 +1229,16 @@ function renderActive() {
 
 function renderStalledBanner(s) {
   // s: { kind: 'auth' | 'rate_limit' | 'exit', message, resetAt? }
-  const ecHomeHint = ' (ec 환경 단일 HOME)';
+  const dismissBtn = `<button type="button" class="ec-btn" id="stalled-dismiss" style="margin-left:auto">✕ 닫기</button>`;
   if (s.kind === 'auth') {
     return `<div class="ec-stalled ec-stalled-auth">
-      <div class="ec-stalled-title">⚠ 인증 필요${ecHomeHint}</div>
+      <div class="ec-stalled-title">⚠ 인증 필요</div>
       <div class="ec-stalled-body">${esc(s.message || 'Claude 세션이 인증 실패로 멈췄습니다.')}</div>
       <div class="ec-stalled-actions">
-        <button class="ec-btn ec-btn-primary" id="stalled-login">로그인 / OAuth</button>
-        <button class="ec-btn" id="stalled-setup-token">장기 토큰 발급</button>
-        <button class="ec-btn" id="stalled-restart">세션 재기동</button>
+        <button type="button" class="ec-btn ec-btn-primary" id="stalled-login">로그인 / OAuth</button>
+        <button type="button" class="ec-btn" id="stalled-setup-token">장기 토큰 발급</button>
+        <button type="button" class="ec-btn" id="stalled-restart">세션 재기동</button>
+        ${dismissBtn}
       </div>
     </div>`;
   }
@@ -1245,9 +1248,10 @@ function renderStalledBanner(s) {
       <div class="ec-stalled-title">⏳ 사용량 한도 도달</div>
       <div class="ec-stalled-body">${esc(s.message || 'Claude rate limit. 다음 윈도까지 대기 또는 다른 모델로 재기동.')}${resetTxt ? ' · 해제 예정: ' + esc(resetTxt) : ''}</div>
       <div class="ec-stalled-actions">
-        <button class="ec-btn" id="stalled-wait">자동 재시도 대기</button>
-        <button class="ec-btn" id="stalled-switch-model">다른 모델로 재기동</button>
-        <button class="ec-btn" id="stalled-restart">세션 재기동</button>
+        <button type="button" class="ec-btn" id="stalled-wait">자동 재시도 대기</button>
+        <button type="button" class="ec-btn" id="stalled-switch-model">다른 모델로 재기동</button>
+        <button type="button" class="ec-btn" id="stalled-restart">세션 재기동</button>
+        ${dismissBtn}
       </div>
     </div>`;
   }
@@ -1260,7 +1264,10 @@ function renderStalledBanner(s) {
   </div>`;
 }
 async function wireStalledBanner(ch) {
+  const dismiss = () => { ch.stalled = null; renderActive(); };
+  $('stalled-dismiss')?.addEventListener('click', dismiss);
   $('stalled-login')?.addEventListener('click', async () => {
+    dismiss();
     try {
       const r = await fetch(apiBase() + 'api/ec-home');
       const h = await r.json();
@@ -1268,6 +1275,7 @@ async function wireStalledBanner(ch) {
     } catch {}
   });
   $('stalled-setup-token')?.addEventListener('click', async () => {
+    dismiss();
     try {
       const r = await fetch(apiBase() + 'api/ec-home');
       const h = await r.json();
@@ -1280,10 +1288,10 @@ async function wireStalledBanner(ch) {
     renderActive();
   });
   $('stalled-wait')?.addEventListener('click', () => {
-    ch.stalled = { ...ch.stalled, message: '자동 재시도 대기 중 — 윈도 해제 시 자동 재기동' };
-    // 윈도 시각이 있으면 그 시점에 자동 재기동
-    if (ch.stalled.resetAt) {
-      const ms = ch.stalled.resetAt * 1000 - Date.now() + 5000;
+    const saved = ch.stalled;
+    ch.stalled = { ...saved, message: '자동 재시도 대기 중 — 윈도 해제 시 자동 재기동' };
+    if (saved.resetAt) {
+      const ms = saved.resetAt * 1000 - Date.now() + 5000;
       if (ms > 0) setTimeout(() => {
         sendWs({ op: 'restart_session', id: nextClientId++, sessionId: ch.sessionId });
         ch.stalled = null;
@@ -1293,7 +1301,6 @@ async function wireStalledBanner(ch) {
     renderActive();
   });
   $('stalled-switch-model')?.addEventListener('click', () => {
-    // info 모달에 모델 변경 UI 있음 — 그쪽으로 안내
     $('ec-info-btn')?.click();
   });
 }
