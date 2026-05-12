@@ -139,8 +139,8 @@ fi
 SERVER_PID=$!
 echo "$SERVER_PID" > "$PID_FILE"
 
-# listen 대기 (최대 6초)
-for i in 1 2 3 4 5 6; do
+# listen 대기 (최대 20초 — 첫 실행 시 node 초기화 시간 고려)
+for i in $(seq 1 20); do
   nc -z 127.0.0.1 7860 2>/dev/null && break
   sleep 1
 done
@@ -174,7 +174,9 @@ if [ ! -d "$APP" ]; then
   exit 1
 fi
 echo "easyclaude를 시작합니다..."
+# 앱 번들 전체 + node 바이너리 quarantine 제거 (첫 실행 Gatekeeper 스캔 방지)
 xattr -cr "$APP" 2>/dev/null || true
+find "$APP/Contents/Resources/node-arm64/bin" -type f -exec xattr -d com.apple.quarantine {} \; 2>/dev/null || true
 open "$APP"
 echo "브라우저에서 http://127.0.0.1:7860 이 열립니다."
 CMD
