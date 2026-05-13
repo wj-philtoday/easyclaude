@@ -1793,6 +1793,15 @@ input[type=checkbox], input[type=radio] {
 #ec-toast.ec-toast-warn  { color: var(--warn);   border-color: var(--warn); }
 #ec-toast.ec-toast-error { color: var(--danger); border-color: var(--danger); }
 
+/* ── EC 시스템 메시지 ── */
+.ec-turn-ec-system {
+  text-align: center;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 6px 16px;
+  user-select: none;
+}
+
 /* ── Statusbar (인풋필드 아래 상태 표시줄) ── */
 .ec-statusbar {
   display: flex;

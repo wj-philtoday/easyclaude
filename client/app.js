@@ -1499,12 +1499,14 @@ function renderActive() {
     : '';
   // 발화 turn(human/assistant/channel)은 그대로 노출, 그 외 (tool_call/tool_out/thinking/result 등)는
   // 연속 구간을 하나의 <details> 그룹으로 묶음. 사용자가 한 스위치로 펼침/접힘.
-  const SPOKEN_TURN_TYPES = new Set(['human', 'assistant', 'channel']);
+  const SPOKEN_TURN_TYPES = new Set(['human', 'assistant', 'channel', 'ec_system']);
   // agent_input은 fold 안으로 — SPOKEN_TURN_TYPES에 포함 안 함
   const renderOneTurn = (t) => {
     const cls = `ec-turn ec-turn-${t.type}` + (t.is_error ? ' ec-error' : '');
     let labelText;
-    if (t.type === 'human') {
+    if (t.type === 'ec_system') {
+      return `<div class="ec-turn-ec-system">${esc(t.body || '')}</div>`;
+    } else if (t.type === 'human') {
       labelText = cfg.userName || T('user_default');
     } else if (t.type === 'assistant') {
       const sess = ecSessions.find(s => s.id === activeSid);

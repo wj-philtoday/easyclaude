@@ -21,14 +21,8 @@ module.exports = {
     if (!st?.signedInAs || !st?.inboxDataDir) return;
     if (ch.signedInAs === st.signedInAs && ch.inboxStop) return;
     _startWatcher(ch, { ioa_id: st.signedInAs, data_dir: st.inboxDataDir });
-    if (st.lastEventTs) ch._lastEventTs = st.lastEventTs; // catch-up용
+    if (st.lastEventTs) ch._lastEventTs = st.lastEventTs;
     console.log(`[plugin:ioa-inbox] restored watcher: ${sess.id} → ${st.signedInAs}`);
-    // EC 재시작 신호
-    setTimeout(() => {
-      const msg = `<channel source="ioa" ioa_id="${st.signedInAs}" from="system" type="restart">\nEC 서버가 재시작됐습니다. 하던 업무를 이어서 진행하세요.\n</channel>`;
-      ec.sendUserText(ch, msg);
-      console.log(`[plugin:ioa-inbox] restart signal → ${st.signedInAs}`);
-    }, 2000);
   },
 
   // stdout 한 줄마다 — signin tool_result 감지 → watcher 설정

@@ -158,6 +158,12 @@ class StreamParser {
     for (const c of contents) {
       if (c.type === 'text') {
         const text = c.text || '';
+        // <ec-system> 태그 — EC 코어 시스템 메시지
+        const ecSysMatch = text.match(/^<ec-system>([\s\S]*?)<\/ec-system>$/);
+        if (ecSysMatch) {
+          this._addTurn({ type: 'ec_system', body: ecSysMatch[1].trim(), ts, uuid });
+          continue;
+        }
         const channel = parseChannelEnvelope(text);
         if (channel) {
           this._addTurn({

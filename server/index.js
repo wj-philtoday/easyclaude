@@ -2235,7 +2235,14 @@ function attachSupervisor(sess, ch, args, childEnv) {
   } catch {}
 
   // reattach 시: supervisor가 이전 exit(143)를 replay할 수 있음 → 첫 번째 143은 억제
-  if (supAlive) ch._intentionalKill = true;
+  if (supAlive) {
+    ch._intentionalKill = true;
+    // EC 재시작 알림 — 2초 후 ec-system 메시지로 주입 (세션 준비 후)
+    setTimeout(() => {
+      console.log(`[easyclaude] ec-system inject: ${sess.id}`);
+      sendUserText(ch, '<ec-system>EC 서버가 재시작됐습니다.</ec-system>');
+    }, 2000);
+  }
 
   if (!supAlive) {
     // detached spawn 새 supervisor
