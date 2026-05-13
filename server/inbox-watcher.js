@@ -13,6 +13,48 @@ function currentEventsFilename(d = new Date()) {
   return `events-${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}.jsonl`;
 }
 
+// 배치 유틸 — index.js에서 사용
+const BATCH_DELAY_MS = 3000;
+const RECAP_DELAY_MS = 5 * 60 * 1000;
+
+const PROCESSED_TS_FILE = 'events-processed-ts.txt';
+
+function readProcessedTs(dataDir) {
+  try { return fs.readFileSync(path.join(dataDir, PROCESSED_TS_FILE), 'utf-8').trim(); } catch { return null; }
+}
+function writeProcessedTs(dataDir, ts) {
+  try { fs.writeFileSync(path.join(dataDir, PROCESSED_TS_FILE), ts); } catch {}
+}
+
+function makeBatchedEventHandler(selfIoaId, sendFn, dataDir) {
+  let buf = [], timer = null;
+  function flush() {
+    if (!buf.length) return;
+    const events = buf.splice(0);
+    timer = null;
+    // 마지막 처리 timestamp 저장
+    const lastTs = events.map(e => e.ts).filter(Boolean).sort().pop();
+    if (lastTs && dataDir) writeProcessedTs(dataDir, lastTs);
+    let text;
+    if (events.length === 1) {
+      text = eventToChannelText(events[0], selfIoaId);
+    } else {
+      const counts = {};
+      for (const e of events) { const s = e.source||'ioa'; counts[s]=(counts[s]||0)+1; }
+      const summary = Object.entries(counts).map(([k,v])=>`${k} ${v}건`).join(', ');
+      const titles = events.map(e=>`• ${e.title||e.type||'(알림)'}`).join('\n');
+      text = `<channel source="ioa" ioa_id="${selfIoaId}" from="${selfIoaId}" type="batch">\n알림 ${events.length}건 (${summary}):\n${titles}\n</channel>`;
+    }
+    console.log(`[inbox-watcher] inject: ${selfIoaId} ${events.length}건`);
+    sendFn(text);
+  }
+  return function handleEvent(event) {
+    buf.push(event);
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(flush, BATCH_DELAY_MS);
+  };
+}
+
 function startWatcher(dataDir, onEvent) {
   const watchers = new Map();   // filename → fs.FSWatcher
   const positions = new Map();  // filename → byte offset
@@ -110,4 +152,4 @@ function detectAgentIdentity(line) {
   return null;
 }
 
-module.exports = { startWatcher, eventToChannelText, detectAgentIdentity };
+module.exports = { startWatcher, eventToChannelText, detectAgentIdentity, makeBatchedEventHandler, readProcessedTs };

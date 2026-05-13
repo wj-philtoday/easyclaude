@@ -11,7 +11,21 @@ const path = require('path');
 const { randomUUID } = require('crypto');
 const os = require('os');
 const { StreamParser } = require('./stream-parser');
-const { startWatcher: startInboxWatcher, eventToChannelText, detectAgentIdentity } = require('./inbox-watcher');
+
+// ── 플러그인 로더 ────────────────────────────────────────────────────────────
+const PLUGINS_DIR = path.join(__dirname, 'plugins');
+const plugins = [];
+function loadPlugins(ecApi) {
+  if (!fs.existsSync(PLUGINS_DIR)) return;
+  for (const f of fs.readdirSync(PLUGINS_DIR).filter(f => f.endsWith('.js'))) {
+    try {
+      const p = require(path.join(PLUGINS_DIR, f));
+      plugins.push(p);
+      if (p.onLoad) p.onLoad(ecApi);
+      console.log(`[ec:plugin] loaded: ${f}`);
+    } catch (e) { console.error(`[ec:plugin] load fail ${f}:`, e.message); }
+  }
+}
 
 // ── HOME sanity check ────────────────────────────────────────────────────────
 // ec server는 항상 real HOME에서 실행되어야 한다 (overlay HOME에서 실행되면
@@ -2132,6 +2146,9 @@ function spawnSession(sess) {
     ch.spawning = false;
   }
 
+  // 플러그인 onSessionSpawn 훅
+  for (const p of plugins) { if (p.onSessionSpawn) p.onSessionSpawn(ch, sess); }
+
   return ch;
 }
 
@@ -2146,7 +2163,7 @@ function handleClaudeStdout(ch, data) {
       ch.rawLog.push(line);
       if (ch.rawLog.length > 200) ch.rawLog.shift();
       ch.parser.feedLine(line);
-      maybeStartInboxFromLine(ch, line);
+      for (const p of plugins) { if (p.onStdoutLine) p.onStdoutLine(ch, line); }
     }
   }
 }
@@ -2159,7 +2176,7 @@ function handleClaudeStderr(ch, data) {
 function handleClaudeExit(ch, exitCode, signal) {
   console.log(`[easyclaude] claude exited: ${ch.sess.id} (code=${exitCode}, signal=${signal})`);
   if (ch.debounceTimer) { clearTimeout(ch.debounceTimer); ch.debounceTimer = null; }
-  if (ch.inboxStop) { try { ch.inboxStop(); } catch {} ch.inboxStop = null; ch.signedInAs = null; }
+  for (const p of plugins) { if (p.onSessionExit) p.onSessionExit(ch); }
   if (ch._intentionalKill) {
     // 의도적 kill(재기동/reattach replay) — closed 브로드캐스트 억제
     ch._intentionalKill = false;
@@ -2278,20 +2295,6 @@ function attachSupervisor(sess, ch, args, childEnv) {
   return virt;
 }
 
-// ── IOA 인박스 watcher trigger ───────────────────────────────────────────────
-// claude의 stdout 라인을 보고 signin/signup tool_result 감지 → watcher 자동 시작/교체.
-function maybeStartInboxFromLine(ch, line) {
-  const identity = detectAgentIdentity(line);
-  if (!identity) return;
-  if (ch.signedInAs === identity.ioa_id && ch.inboxStop) return; // 이미 watching 중
-  if (ch.inboxStop) { try { ch.inboxStop(); } catch {} ch.inboxStop = null; }
-  ch.signedInAs = identity.ioa_id;
-  ch.inboxStop = startInboxWatcher(identity.data_dir, (event) => {
-    const text = eventToChannelText(event, identity.ioa_id);
-    sendUserText(ch, text);
-  });
-  console.log(`[easyclaude] inbox watcher: ${ch.sess.id} → ${identity.ioa_id} (${identity.data_dir})`);
-}
 
 // ── 입력 헬퍼 ────────────────────────────────────────────────────────────────
 function notifyInputFailed(ch, kind, reason, message) {
@@ -2775,4 +2778,6 @@ process.on('SIGINT',  shutdown);
 server.listen(PORT, HOST, () => {
   console.log(`[easyclaude] ${HOST}:${PORT}`);
   console.log(`[easyclaude] sessions: ${sessions().map(s => s.id).join(', ') || '(none)'}`);
+  // 플러그인 로드 (서버 ready 후)
+  loadPlugins({ sessionState, saveState, ptyChannels, sendUserText });
 });
