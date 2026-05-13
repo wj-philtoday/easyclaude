@@ -2160,6 +2160,11 @@ function handleClaudeExit(ch, exitCode, signal) {
   console.log(`[easyclaude] claude exited: ${ch.sess.id} (code=${exitCode}, signal=${signal})`);
   if (ch.debounceTimer) { clearTimeout(ch.debounceTimer); ch.debounceTimer = null; }
   if (ch.inboxStop) { try { ch.inboxStop(); } catch {} ch.inboxStop = null; ch.signedInAs = null; }
+  if (ch._intentionalKill) {
+    // 의도적 kill(재기동/reattach replay) — closed 브로드캐스트 억제
+    ch._intentionalKill = false;
+    return;
+  }
   const snap = ch.parser.snapshot();
   ch.broadcast({ op: 'turns', turns: snap.turns, usage: snap.session.usage });
   ch.broadcast({ op: 'closed', exitCode, signal, stderr: ch.stderrLog.join('').slice(-2000) });
@@ -2191,6 +2196,9 @@ function attachSupervisor(sess, ch, args, childEnv) {
     supPid = parseInt(txt, 10);
     if (supPid > 0) { try { process.kill(supPid, 0); supAlive = true; } catch {} }
   } catch {}
+
+  // reattach 시: supervisor가 이전 exit(143)를 replay할 수 있음 → 첫 번째 143은 억제
+  if (supAlive) ch._intentionalKill = true;
 
   if (!supAlive) {
     // detached spawn 새 supervisor
@@ -2560,7 +2568,7 @@ wss.on('connection', ws => {
       sessionState[att.sessionId] = sessionState[att.sessionId] || {};
       sessionState[att.sessionId].argsOverride = newArgs;
       saveState(sessionState);
-      if (ch && ch.proc) { try { ch.proc.kill(); } catch {} ch.proc = null; ch.alive = false; }
+      if (ch && ch.proc) { ch._intentionalKill = true; try { ch.proc.kill(); } catch {} ch.proc = null; ch.alive = false; }
       const nch = spawnSession(sessions().find(s => s.id === att.sessionId));
       if (nch && !nch.subscribers.has(ws)) nch.subscribers.set(ws, new Set());
       if (nch) nch.subscribers.get(ws).add(id);
@@ -2569,7 +2577,6 @@ wss.on('connection', ws => {
     }
 
     if (op === 'model_toggle') {
-      // sdk-cli에서 /model 미지원 → args 수정 후 재기동
       const att = wsChannels.get(id);
       if (!att) return;
       const ch = ptyChannels.get(att.sessionId);
@@ -2581,7 +2588,7 @@ wss.on('connection', ws => {
       sessionState[att.sessionId] = sessionState[att.sessionId] || {};
       sessionState[att.sessionId].argsOverride = newArgs;
       saveState(sessionState);
-      if (ch && ch.proc) { try { ch.proc.kill(); } catch {} ch.proc = null; ch.alive = false; }
+      if (ch && ch.proc) { ch._intentionalKill = true; try { ch.proc.kill(); } catch {} ch.proc = null; ch.alive = false; }
       const nch = spawnSession(sessions().find(s => s.id === att.sessionId));
       if (nch && !nch.subscribers.has(ws)) nch.subscribers.set(ws, new Set());
       if (nch) nch.subscribers.get(ws).add(id);
@@ -2663,9 +2670,15 @@ wss.on('connection', ws => {
         saveState(sessionState);
       }
       const ch = ptyChannels.get(att.sessionId);
+      // 이미 alive이면 kill 없이 restarted만 응답 (open op으로 이미 spawn된 경우)
+      if (ch && ch.proc && ch.proc.exitCode === null) {
+        send({ op: 'restarted', id, claudeId: ch.claudeId, alive: true });
+        return;
+      }
       if (ch && ch.proc) {
+        ch._intentionalKill = true;
         try { ch.proc.kill(); } catch {}
-        ch.proc = null;     // 즉시 dormant 처리 (spawnSession 이 respawn 하도록)
+        ch.proc = null;
         ch.alive = false;
       }
       const sess = sessions().find(s => s.id === att.sessionId);

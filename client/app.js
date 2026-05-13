@@ -257,12 +257,17 @@ let reconnectAttempts = 0;
 let reconnectTimer = null;
 
 function connect() {
+  // 이전 WS가 살아있으면 이벤트 핸들러 제거 후 닫기 (중복 close 이벤트 방지)
+  if (ws && ws.readyState !== WebSocket.CLOSED) {
+    try { ws.onclose = null; ws.onerror = null; ws.onmessage = null; ws.onopen = null; ws.close(); } catch {}
+  }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const base  = location.pathname.replace(/[^/]*$/, '') || '/';
   setStatus('connecting…', 'warn');
   ws = new WebSocket(`${proto}://${location.host}${base}`);
   ws.addEventListener('open', () => {
     setStatus('connected', 'ok');
+    if (reconnectAttempts > 0) showToast('서버 재연결됨', 'ok', 2000);
     reconnectAttempts = 0;
     // channels.clear() + activeSid=null 을 제거 — reconnect 시 이전 UI 상태 보존.
     // 대신 기존 채널들을 alive=false 로만 표시하고, server 'sessions' 응답 후 재open.
@@ -282,11 +287,12 @@ function connect() {
   });
   ws.addEventListener('message', e => onMsg(JSON.parse(e.data)));
   ws.addEventListener('close', () => {
+    if (reconnectAttempts === 0) showToast('서버 연결 끊김 — 재연결 중…', 'warn', 5000);
     setStatus(outboundQueue.length ? `disconnected (queued ${outboundQueue.length})` : 'disconnected', 'err');
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectAttempts++;
-    // 지수 backoff: 0.5s → 1s → 2s → ... 최대 15s
-    const delay = Math.min(500 * Math.pow(1.7, reconnectAttempts - 1), 15000);
+    // 지수 backoff: 0.5s → 1s → 2s → ... 최대 8s (빠른 재연결)
+    const delay = Math.min(500 * Math.pow(1.7, reconnectAttempts - 1), 8000);
     reconnectTimer = setTimeout(connect, delay);
   });
   ws.addEventListener('error', () => {});
@@ -297,6 +303,7 @@ function connect() {
       if (document.visibilityState === 'visible') {
         if (!ws || ws.readyState !== WebSocket.OPEN) {
           if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+          reconnectAttempts = 0; // backoff 리셋 — 포그라운드 복귀 시 즉시 재시도
           connect();
         }
         // 활성 ch가 비어 보이면 history 강제 reload
@@ -334,6 +341,20 @@ function setStatus(text, kind) {
   $status.className = 'ec-parse-status' + (kind ? ' ec-status-' + kind : '');
 }
 
+let _toastTimer = null;
+function showToast(text, kind = 'info', durationMs = 3000) {
+  let toast = document.getElementById('ec-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'ec-toast';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = text;
+  toast.className = 'ec-toast ec-toast-' + kind + ' ec-toast-show';
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => { toast.classList.remove('ec-toast-show'); }, durationMs);
+}
+
 function onMsg(msg) {
   const { op, id } = msg;
   if (op === 'sessions') {
@@ -354,12 +375,19 @@ function onMsg(msg) {
     renderTabs();
     // 홈 화면(activeSid 없음)이면 최근 세션 목록 갱신
     if (!activeSid) renderHome();
-    // reconnect 후 이전 활성 세션 자동 복귀
+    // reconnect 후 이전 활성 세션 자동 복귀 — 항상 force reopen (모바일 백그라운드 후 id 갱신)
     if (pendingReopenSid && ecSessions.some(s => s.id === pendingReopenSid)) {
       const sidToReopen = pendingReopenSid;
       pendingReopenSid = null;
-      if (!channels.has(sidToReopen)) openSession(sidToReopen);
-      // openSession이 즉시 활성화 처리하지만, 만약 안 되면 명시적 activate
+      if (!channels.has(sidToReopen)) {
+        openSession(sidToReopen);
+      } else {
+        // 채널은 있지만 서버엔 미등록 → 새 id로 open op 강제 재전송
+        const ch = channels.get(sidToReopen);
+        const newId = nextClientId++;
+        ch.id = newId;
+        sendWs({ op: 'open', id: newId, sessionId: sidToReopen });
+      }
       setTimeout(() => { if (channels.has(sidToReopen)) activate(sidToReopen); }, 100);
     }
     return;
@@ -419,15 +447,20 @@ function onMsg(msg) {
   }
   const ch = id != null ? [...channels.values()].find(c => c.id === id) : null;
   if (op === 'opened') {
-    if (ch) { ch.alive = true; ch.claudeId = msg.info?.claudeId; }
+    if (ch) { ch.alive = true; ch.claudeId = msg.info?.claudeId; ch.stalled = null; }
     refreshTabState();
+    if (ch && ch.sessionId === activeSid) renderActive();
     return;
   }
   if (op === 'turns') {
     if (!ch) return;
-    ch.turns = msg.turns || [];
+    const newTurns = msg.turns || [];
+    // 재연결 직후 빈 turns로 기존 turns를 덮어쓰지 않음 (supervisor replay 완료까지 보존)
+    if (newTurns.length > 0 || ch.turns.length === 0) {
+      ch.turns = newTurns;
+    }
     ch.usage = msg.usage || ch.usage;
-    if (ch.stalled && ch.turns.length) ch.stalled = null;  // 응답 재개 시 stalled/dismissed 해제
+    if (ch.stalled && ch.turns.length) ch.stalled = null;
     // pendingInputs 중 서버 turns에 매칭되는 항목 제거 (echo 도착) + draft localStorage 삭제
     if (ch.pendingInputs?.length) {
       const confirmed = ch.pendingInputs.filter(p => ch.turns.some(t => t.type === 'human' && t.body === p.text));
@@ -518,13 +551,13 @@ function onMsg(msg) {
     if (ch) {
       ch.alive = !!msg.alive;
       ch.claudeId = msg.claudeId;
-      // turns 는 reset 하지 않음 — 서버가 영속 (--resume) + 새 system 이벤트로 갱신될 것
       ch.pendingDialog = null;
       ch.stalled = null;
     }
     refreshTabState();
     renderActive();
     renderPermPill();
+    if (ch && ch.sessionId === activeSid) showToast('세션 재기동 완료', 'ok');
     return;
   }
   if (op === 'error') {
@@ -1057,7 +1090,16 @@ function activate(sessionId) {
   renderUsage();
   renderPermPill();
   const savedDraft = localStorage.getItem('ec-draft-' + sessionId);
-  if (savedDraft && !$input.value) $input.value = savedDraft;
+  if (savedDraft) {
+    const draftCh = channels.get(sessionId);
+    const allTurns = [...(draftCh?.histTurns || []), ...(draftCh?.turns || [])];
+    const alreadySent = allTurns.some(t => t.type === 'human' && t.body === savedDraft);
+    if (alreadySent) {
+      localStorage.removeItem('ec-draft-' + sessionId);
+    } else if (!$input.value) {
+      $input.value = savedDraft;
+    }
+  }
   if (ch?.pendingDialog) showDialog(ch);
   else hideDialog();
   requestAnimationFrame(() => $input.focus());
@@ -1514,18 +1556,24 @@ function renderActive() {
   // 인증/리밋 등 fallback banner
   const stalled = ch.stalled || null;
   const stalledHtml = stalled ? renderStalledBanner(stalled) : '';
-  // 응답 대기 인디케이터: alive이고 마지막 visible turn이 human/channel이면 claude가 생각중
+  // 응답 대기 인디케이터: alive이고 마지막 visible turn이 human/channel이면 thinking dots
   const allForWait = [...visible, ...pending.map(p => ({ type: 'human' }))];
   const lastT = allForWait[allForWait.length - 1];
   const isWaiting = !stalled && ch.alive && lastT && (lastT.type === 'human' || lastT.type === 'channel');
   const sess = ecSessions.find(s => s.id === ch.sessionId);
   const sessLabel = sess ? effectiveLabel(sess) : 'Claude';
+  // 재기동 중 표시: alive이지만 아직 아무 visible turn 없음 (히스토리 포함)
+  const isRestarting = !stalled && ch.alive && visible.length === 0 && !pending.length;
   const waitingHtml = isWaiting ? `
     <div class="ec-turn ec-turn-assistant">
       <div class="ec-turn-label" style="color:${COLORS.assistant||'var(--green)'}">${esc(sessLabel)}</div>
       <div class="ec-turn-body ec-thinking-dots">
         <span></span><span></span><span></span>
       </div>
+    </div>` : isRestarting ? `
+    <div class="ec-turn ec-turn-assistant">
+      <div class="ec-turn-label" style="color:var(--muted)">시스템</div>
+      <div class="ec-turn-body" style="color:var(--muted);font-size:12px">세션 시작 중…</div>
     </div>` : '';
   // 저장: render 직전 열려있는 details 인덱스
   const openDetailIndices = new Set();
@@ -1613,7 +1661,8 @@ async function wireStalledBanner(ch) {
   $('stalled-restart')?.addEventListener('click', () => {
     ch.stalled = null;
     renderActive();
-    sendWs({ op: 'restart', id: ch.id });
+    if (!ch.alive) sendWs({ op: 'restart', id: ch.id });
+    // 이미 alive면 open op으로 이미 재기동됨 — restart 중복 전송 안 함
   });
   $('stalled-wait')?.addEventListener('click', () => {
     const saved = ch.stalled;
