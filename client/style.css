@@ -1321,6 +1321,68 @@ input[type=checkbox], input[type=radio] {
   font-style: normal; font-size: 11px;
   color: var(--muted); margin-left: 6px;
 }
+
+/* ── 전폭 디바이더 ──────────────────────────────── */
+.ec-divider {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--muted); font-size: 11px;
+  padding: 2px 0; margin: 2px 0;
+}
+.ec-divider::before, .ec-divider::after {
+  content: ''; flex: 1;
+  border-top: 1px solid var(--border);
+}
+.ec-divider-warn { color: var(--orange, #f59e0b); }
+.ec-divider-warn::before, .ec-divider-warn::after {
+  border-color: var(--orange, #f59e0b);
+}
+.ec-compact-spinner {
+  display: inline-block; width: 8px; height: 8px;
+  border: 1.5px solid var(--muted); border-top-color: transparent;
+  border-radius: 50%; animation: ec-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes ec-spin { to { transform: rotate(360deg); } }
+.ec-compact-details { margin-top: 4px; text-align: left; }
+.ec-compact-details summary {
+  cursor: pointer; font-size: 11px; color: var(--muted); user-select: none;
+}
+.ec-compact-details pre {
+  margin-top: 4px; padding: 8px; background: var(--surface-2);
+  border-radius: 4px; font-size: 11px; white-space: pre-wrap;
+  word-break: break-word; text-align: left; color: var(--text);
+}
+
+/* ── 커맨드 pill ─────────────────────────────────── */
+.ec-cmd-pill {
+  display: block; text-align: right;
+  font-family: var(--font-mono, monospace); font-size: 11px;
+  padding: 2px 8px; margin: 2px 0;
+  opacity: 1; transition: opacity 0.2s;
+}
+.ec-cmd-pill.ec-pending { opacity: 0.4; }
+.ec-cmd-pill-slash { color: var(--accent, var(--green)); }
+.ec-cmd-pill-bash  { color: var(--blue, #60a5fa); }
+
+/* ── 일반 pending 말풍선 투명화 ─────────────────── */
+.ec-pending { opacity: 0.45; transition: opacity 0.2s; }
+
+/* ── bash 그룹 ───────────────────────────────────── */
+.ec-bash-group { margin: 2px 0; }
+.ec-bash-details { margin-top: 2px; }
+.ec-bash-details summary {
+  cursor: pointer; font-size: 11px; color: var(--muted);
+  user-select: none; list-style: none; text-align: right;
+  padding-right: 4px;
+}
+.ec-bash-details summary::-webkit-details-marker { display: none; }
+.ec-bash-output {
+  margin: 4px 0 0; padding: 8px 10px;
+  background: var(--surface-2); border-radius: 4px;
+  font-size: 12px; white-space: pre-wrap; word-break: break-word;
+  color: var(--text); text-align: left;
+  max-height: 300px; overflow-y: auto;
+}
 @keyframes ec-thinking {
   0%, 60%, 100% { opacity: 0.2; transform: scale(0.8); }
   30% { opacity: 1; transform: scale(1); }

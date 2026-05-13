@@ -452,44 +452,36 @@ function onMsg(msg) {
     if (ch && ch.sessionId === activeSid) renderActive();
     return;
   }
-  if (op === 'turns') {
+  if (op === 'events') {
     if (!ch) return;
-    const newTurns = msg.turns || [];
-    // 재연결 직후 빈 turns로 기존 turns를 덮어쓰지 않음 (supervisor replay 완료까지 보존)
-    if (newTurns.length > 0 || ch.turns.length === 0) {
-      ch.turns = newTurns;
-    }
+    const newEvts = msg.events || [];
+    if (newEvts.length > 0 || !ch.events?.length) ch.events = newEvts;
     ch.usage = msg.usage || ch.usage;
-    if (ch.stalled && ch.turns.length) ch.stalled = null;
-    // pendingInputs 중 서버 turns에 매칭되는 항목 제거 (echo 도착) + draft localStorage 삭제
-    if (ch.pendingInputs?.length) {
-      const confirmed = ch.pendingInputs.filter(p => ch.turns.some(t => t.type === 'human' && t.body === p.text));
-      confirmed.forEach(p => { if (p.draftKey) localStorage.removeItem(p.draftKey); });
-      ch.pendingInputs = ch.pendingInputs.filter(p => !ch.turns.some(t => t.type === 'human' && t.body === p.text));
-    }
+    if (ch.stalled && ch.events.length) ch.stalled = null;
+    confirmPendingInputs(ch);
     if (ch.sessionId === activeSid) { renderActive(); renderUsage(); }
     return;
   }
-  if (op === 'turns_patch') {
-    // 증분 turns 업데이트 — 서버가 from 인덱스부터 tail만 보냄.
-    // 긴 세션에서 매 턴마다 전체 array 전송하던 메모리/네트워크 폭발 회피.
+  if (op === 'events_patch') {
     if (!ch) return;
     const from = msg.from | 0;
-    const patch = msg.turns || [];
-    // ch.turns 가 from 보다 짧으면 sync drift — 서버에 full 재요청
-    if (ch.turns.length < from) {
+    const patch = msg.events || [];
+    if ((ch.events || []).length < from) {
       sendWs({ op: 'open', id: ch.id, sid: ch.sessionId });
       return;
     }
-    ch.turns.splice(from, ch.turns.length - from, ...patch);
+    ch.events = ch.events || [];
+    ch.events.splice(from, ch.events.length - from, ...patch);
     ch.usage = msg.usage || ch.usage;
-    if (ch.stalled && ch.turns.length) ch.stalled = null;
-    if (ch.pendingInputs?.length) {
-      const confirmed = ch.pendingInputs.filter(p => ch.turns.some(t => t.type === 'human' && t.body === p.text));
-      confirmed.forEach(p => { if (p.draftKey) localStorage.removeItem(p.draftKey); });
-      ch.pendingInputs = ch.pendingInputs.filter(p => !ch.turns.some(t => t.type === 'human' && t.body === p.text));
-    }
+    if (ch.stalled && ch.events.length) ch.stalled = null;
+    confirmPendingInputs(ch);
     if (ch.sessionId === activeSid) { renderActive(); renderUsage(); }
+    return;
+  }
+  // 하위호환: 구형 turns/turns_patch (전환 기간)
+  if (op === 'turns' || op === 'turns_patch') {
+    if (!ch) return;
+    if (ch.sessionId === activeSid) renderActive();
     return;
   }
   if (op === 'system') {
@@ -1160,11 +1152,13 @@ function openSession(sessionId) {
     label: meta?.label || sessionId,
     alive: false,
     turns: [],
-    histTurns: [],     // jsonl에서 파스된 옛 turn (위 스크롤 시 prepend)
-    histStart: -1,     // 다음 페이지 fetch 시작점 (-1 = 아직 미로드, 0 = 최상단 도달)
+    events: [],         // {evt, lex} 배열 — lexicon 분류 결과
+    histEvents: [],     // jsonl에서 로드한 옛 events (위 스크롤 시 prepend)
+    histTurns: [],      // 하위호환용 (미사용)
+    histStart: -1,
     histTotal: 0,
     histLoading: false,
-    pendingInputs: [],  // optimistic 사용자 메시지 (서버 echo 도착 전 표시)
+    pendingInputs: [],
     usage: null,
     session: null,
     pendingDialog: null,
@@ -1194,11 +1188,12 @@ async function loadMoreHistory(ch) {
     if (!data || !data.ok) return;
     ch.histTotal = data.total;
     ch.histStart = data.start;
-    if (Array.isArray(data.turns) && data.turns.length) {
+    const newItems = data.events || data.turns || [];
+    if (Array.isArray(newItems) && newItems.length) {
       const wasActive = ch.sessionId === activeSid;
       const prevH = wasActive ? $parsed.scrollHeight : 0;
       const prevT = wasActive ? $parsed.scrollTop : 0;
-      ch.histTurns = data.turns.concat(ch.histTurns);
+      ch.histEvents = newItems.concat(ch.histEvents || []);
       if (wasActive) {
         renderActive();
         // 스크롤 위치 보정 — prepend된 만큼 아래로
@@ -1264,6 +1259,8 @@ const COLORS = {
 };
 // 기본 숨김 turn type — 디버그 모드에서만 표시
 const HIDDEN_TYPES_DEFAULT = new Set(['meta', 'hook', 'other']);
+// cmd pill eventTypes — meta이지만 채팅 인라인에 표시
+const CMD_PILL_EVENTS = new Set(['compact_cmd', 'clear_cmd', 'bash_cmd', 'slash_cmd']);
 function showDebugEvents() {
   try { return localStorage.getItem('ec.showDebug') === '1'; } catch { return false; }
 }
@@ -1272,7 +1269,12 @@ function setShowDebugEvents(v) {
 }
 function shouldHideTurn(t) {
   if (showDebugEvents()) return false;
+  if (t.type === 'meta' && CMD_PILL_EVENTS.has(t.eventType)) return false;
   return HIDDEN_TYPES_DEFAULT.has(t.type);
+}
+function extractCmd(body) {
+  const m = (body || '').match(/<command-name>([\s\S]*?)<\/command-name>/);
+  return m ? m[1].trim() : (body || '').trim().slice(0, 80);
 }
 
 // ── (제거됨) jsonl 모달 — 대화창 in-place history로 대체 ────────────────────
@@ -1523,90 +1525,26 @@ function renderActive() {
     renderUsage();
     return;
   }
-  const allTurns = [...(ch.histTurns || []), ...(ch.turns || [])];
-  // stalled 감지는 server-side onTurn에서 'stalled' ws op으로 broadcast.
-  // renderActive는 감지 없이 ch.stalled 상태만 표시.
-  const visible = allTurns.filter(t => !shouldHideTurn(t));
-  const hiddenCount = allTurns.length - visible.length;
+  // events 기반 렌더링 (renderer.js)
+  const allEvents = [...(ch.histEvents || []), ...(ch.events || [])];
   const pending = ch.pendingInputs || [];
-  if (!visible.length && !pending.length && !hiddenCount) {
+  if (!allEvents.length && !pending.length) {
     $parsed.innerHTML = '<div class="ec-empty">출력 대기 중…</div>';
     return;
   }
   const wasAtBottom = $parsed.scrollTop + $parsed.clientHeight + 80 >= $parsed.scrollHeight;
-  const hiddenBanner = hiddenCount > 0
-    ? `<div class="ec-hidden-banner" id="ec-hidden-banner">메타/훅 이벤트 ${hiddenCount}개 숨김 — <a href="#" id="ec-show-debug">디버그 표시</a></div>`
-    : '';
-  // 발화 turn(human/assistant/channel)은 그대로 노출, 그 외 (tool_call/tool_out/thinking/result 등)는
-  // 연속 구간을 하나의 <details> 그룹으로 묶음. 사용자가 한 스위치로 펼침/접힘.
-  const SPOKEN_TURN_TYPES = new Set(['human', 'assistant', 'channel', 'ec_system']);
-  // agent_input은 fold 안으로 — SPOKEN_TURN_TYPES에 포함 안 함
-  const renderOneTurn = (t) => {
-    const cls = `ec-turn ec-turn-${t.type}` + (t.is_error ? ' ec-error' : '');
-    let labelText;
-    if (t.type === 'ec_system') {
-      return `<div class="ec-turn-ec-system">${esc(t.body || '')}</div>`;
-    } else if (t.type === 'human') {
-      labelText = cfg.userName || T('user_default');
-    } else if (t.type === 'assistant') {
-      const sess = ecSessions.find(s => s.id === activeSid);
-      labelText = sess ? effectiveLabel(sess) : 'Claude';
-    } else if (t.type === 'meta' && t.eventType) {
-      labelText = `${LABELS.meta} · ${t.eventType}`;
-    } else if (t.type === 'tool_call' && t.category === 'agent') {
-      const prompt = t.input?.prompt || t.input?.description || '';
-      const summary = prompt ? prompt.slice(0, 120) + (prompt.length > 120 ? '…' : '') : (t.tool_name || 'Agent');
-      labelText = `🤖 ${t.tool_name || 'Agent'}`;
-      const RENDERABLE = new Set(['human','assistant','channel','thinking','agent_input']);
-      const bodyHtml = `<div style="font-size:12px;color:var(--text-2);margin-bottom:4px">${esc(summary)}</div><details><summary style="font-size:11px;color:var(--muted);cursor:pointer">전체 프롬프트 보기</summary><pre style="margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:11px">${esc(t.body||'')}</pre></details>`;
-      return `<div class="${cls}"><div class="ec-turn-label" style="color:${COLORS[t.type]||'var(--muted)'}">${esc(labelText)}</div><div class="ec-turn-body ${t.type}">${bodyHtml}</div></div>`;
-    } else {
-      labelText = LABELS[t.type] || t.type;
-    }
-    // assistant/human/channel/agent_input은 마크다운 렌더링 대상; 나머지는 코드/원문 그대로
-    const RENDERABLE = new Set(['human','assistant','channel','thinking','agent_input']);
-    const bodyHtml = RENDERABLE.has(t.type) ? ecRenderBody(t.body || '') : `<pre style="margin:0;white-space:pre-wrap;word-break:break-word">${esc(t.body||'')}</pre>`;
-    return `<div class="${cls}"><div class="ec-turn-label" style="color:${COLORS[t.type]||'var(--muted)'}">${esc(labelText)}</div><div class="ec-turn-body ${t.type}">${bodyHtml}</div></div>`;
-  };
-  let turnsHtml = '';
-  let foldBuf = [];
-  const flushFold = () => {
-    if (!foldBuf.length) return '';
-    const n = foldBuf.length;
-    const counts = {};
-    for (const t of foldBuf) counts[t.type] = (counts[t.type] || 0) + 1;
-    const summary = Object.entries(counts).map(([k,v]) => `${LABELS[k]||k}${v>1?' ×'+v:''}`).join(' · ');
-    const inner = foldBuf.map(renderOneTurn).join('');
-    foldBuf = [];
-    return `<details class="ec-turn-fold"><summary>▸ ${esc(summary)} <span class="ec-muted">(${n})</span></summary>${inner}<div class="ec-fold-close-btn">▲ 접기</div></details>`;
-  };
-  for (const t of visible) {
-    if (SPOKEN_TURN_TYPES.has(t.type)) {
-      turnsHtml += flushFold();
-      turnsHtml += renderOneTurn(t);
-    } else {
-      foldBuf.push(t);
-    }
-  }
-  turnsHtml += flushFold();
-  // pending: 서버 echo 전까지 즉시 표시 (optimistic). 일반 유저 버블과 동일 스타일.
-  const pendingHtml = pending.map(p => `
-    <div class="ec-turn ec-turn-human">
-      <div class="ec-turn-label" style="color:${COLORS.human}">${esc(cfg.userName || T('user_default'))}</div>
-      <div class="ec-turn-body human">${esc(p.text)}</div>
-    </div>`).join('');
-  // 인증/리밋 등 fallback banner
+  // 활성 세션 라벨 전달 (renderer에서 assistant 이름 표시용)
+  const sess = ecSessions.find(s => s.id === ch.sessionId);
+  window.__activeSessLabel = sess ? effectiveLabel(sess) : 'Claude';
+
+  const turnsHtml = renderEventStream(allEvents);
+  const pendingHtml = renderPendingInputs(pending);
   const stalled = ch.stalled || null;
   const stalledHtml = stalled ? renderStalledBanner(stalled) : '';
-  // 응답 대기 인디케이터: alive이고 마지막 visible turn이 human/channel이면 thinking dots
-  const allForWait = [...visible, ...pending.map(p => ({ type: 'human' }))];
-  const lastT = allForWait[allForWait.length - 1];
-  const isWaiting = !stalled && ch.alive && lastT && (lastT.type === 'human' || lastT.type === 'channel');
-  const sess = ecSessions.find(s => s.id === ch.sessionId);
-  const sessLabel = sess ? effectiveLabel(sess) : 'Claude';
-  // 재기동 중 표시: alive이지만 아직 아무 visible turn 없음 (히스토리 포함)
-  const isRestarting = !stalled && ch.alive && visible.length === 0 && !pending.length;
-  const waitingHtml = isWaiting ? `
+  const waiting = isWaitingForResponse(ch, pending);
+  const sessLabel = window.__activeSessLabel;
+  const isRestarting = !stalled && ch.alive && !allEvents.length && !pending.length;
+  const waitingHtml = waiting ? `
     <div class="ec-turn ec-turn-assistant">
       <div class="ec-turn-label" style="color:${COLORS.assistant||'var(--green)'}">${esc(sessLabel)}</div>
       <div class="ec-turn-body ec-thinking-dots">
@@ -1622,7 +1560,7 @@ function renderActive() {
   const openDetailIndices = new Set();
   $parsed.querySelectorAll('details').forEach((el, i) => { if (el.open) openDetailIndices.add(i); });
 
-  $parsed.innerHTML = hiddenBanner + turnsHtml + pendingHtml + waitingHtml + stalledHtml;
+  $parsed.innerHTML = turnsHtml + pendingHtml + waitingHtml + stalledHtml;
   $('ec-show-debug')?.addEventListener('click', e => {
     e.preventDefault();
     setShowDebugEvents(true);
@@ -1840,11 +1778,13 @@ function sendInput() {
     }
   }
   const draftKey = 'ec-draft-' + ch.sessionId;
-  localStorage.setItem(draftKey, val);  // WS 실패 시 복구용 — echo 확인 후 삭제
+  localStorage.setItem(draftKey, val);
   sendWs({ op:'input', id: ch.id, data: val });
-  // optimistic 풍선 — echo 도착 전 즉시 표시
   ch.pendingInputs = ch.pendingInputs || [];
-  ch.pendingInputs.push({ text: val, sentAt: Date.now(), draftKey });
+  const isSlashCmd = /^\/\w/.test(val.trim());
+  const isBashCmd  = /^!\s/.test(val.trim());
+  const kind = isSlashCmd ? 'slash' : isBashCmd ? 'bash' : null;
+  ch.pendingInputs.push({ text: val, kind, sentAt: Date.now(), draftKey });
   $input.value = '';
   autosize();
   hideAc();
