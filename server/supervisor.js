@@ -37,6 +37,9 @@ try { ENV  = JSON.parse(process.argv[7] || '{}'); } catch {}
 if (!SID || !SOCK) { console.error('usage: supervisor.js <sid> <sock> <pid> <cwd> <argsJson> <envJson>'); process.exit(2); }
 
 const childEnv = { ...process.env, ...ENV };
+// EC가 삭제한 claude 세션 관련 env vars가 process.env에서 다시 유입되지 않도록 제거
+delete childEnv.CLAUDE_CODE_SESSION_ID;
+delete childEnv.CLAUDE_CODE_ENTRYPOINT;
 
 // pid 파일 기록
 try { fs.mkdirSync(path.dirname(PIDF), { recursive: true }); } catch {}
