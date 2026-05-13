@@ -88,10 +88,19 @@ fs.mkdirSync(path.dirname(SOCK), { recursive: true });
 const server = net.createServer(conn => {
   conns.add(conn);
   // hello + catch-up
+  // 주의: claude가 이미 exit한 경우, exit op는 catch-up으로 replay하지 않음.
+  // 대신 hello에 exited 플래그를 포함해 EC가 명시적으로 처리하게 한다
+  // (replay하면 EC가 채널을 dormant 처리 → ec-system inject로 sendUserText →
+  // 자동 respawn → 새 EC 연결 → 또 exit replay → 무한 루프 발생함).
   try {
-    conn.write(JSON.stringify({ op: 'hello', sid: SID, claudePid: proc.pid, bufferedChunks: buffer.length }) + '\n');
+    conn.write(JSON.stringify({
+      op: 'hello', sid: SID,
+      claudePid: proc.pid,
+      bufferedChunks: buffer.length,
+      exited,
+      exitInfo: exited ? exitInfo : null,
+    }) + '\n');
     for (const e of buffer) conn.write(JSON.stringify(e) + '\n');
-    if (exited && exitInfo) conn.write(JSON.stringify({ op: 'exit', ...exitInfo }) + '\n');
   } catch {}
   let inbuf = '';
   conn.on('data', d => {

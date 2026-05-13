@@ -109,6 +109,8 @@ class StreamParser {
         this.h.onSystem && this.h.onSystem(this.session);
         return;
       case 'compact_boundary':
+        this.h.onCompactBoundary && this.h.onCompactBoundary(evt);
+        return;
       case 'session_id_change':
       case 'usage_alert':
         // 세션 lifecycle 이벤트 — 흡수
@@ -164,6 +166,10 @@ class StreamParser {
           this._addTurn({ type: 'ec_system', body: ecSysMatch[1].trim(), ts, uuid });
           continue;
         }
+        // /clear 명령 감지 — 다음 빈 assistant 응답을 ec_system으로 대체
+        if (/^\/clear\s*$/.test(text.trim())) {
+          this._clearPending = true;
+        }
         const channel = parseChannelEnvelope(text);
         if (channel) {
           this._addTurn({
@@ -211,6 +217,15 @@ class StreamParser {
     const contents = Array.isArray(msg.content) ? msg.content : [];
     const ts = evt.timestamp || null;
     const uuid = evt.uuid || null;
+    // /clear 후 빈 assistant 응답 → ec_system "클리어 완료"로 대체
+    const hasText = contents.some(c => c.type === 'text' && c.text);
+    if (!hasText && this._clearPending) {
+      this._clearPending = false;
+      this._addTurn({ type: 'ec_system', body: '대화 내역이 초기화됐습니다.', ts, uuid });
+      if (msg.usage) this._updateUsage(msg.usage);
+      return;
+    }
+    this._clearPending = false;
     for (const c of contents) {
       if (c.type === 'text') {
         this._addTurn({ type: 'assistant', body: c.text || '', ts, uuid });
@@ -254,6 +269,10 @@ class StreamParser {
   }
 
   _onResult(evt) {
+    if (this._clearPending) {
+      this._clearPending = false;
+      this._addTurn({ type: 'ec_system', body: '대화 내역이 초기화됐습니다.' });
+    }
     if (evt.usage) this._updateUsage(evt.usage);
     this.lastResult = {
       subtype: evt.subtype,

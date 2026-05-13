@@ -40,6 +40,23 @@ function loadPlugins(ecApi) {
   }
 })();
 
+// ── claude CLI 경로 resolve ───────────────────────────────────────────────────
+// 서버 시작 환경의 PATH에 의존하지 않고 절대 경로를 한 번 고정.
+// CLAUDE_CODE_EXECPATH(claude가 자신의 설치 디렉터리를 주입) → which claude → fallback.
+const CLAUDE_BIN = (() => {
+  const execDir = process.env.CLAUDE_CODE_EXECPATH;
+  if (execDir) {
+    const c = path.join(execDir, 'claude');
+    try { if (fs.statSync(c).isFile()) return c; } catch {}
+  }
+  try {
+    const w = require('child_process').execFileSync('which', ['claude'], { encoding: 'utf8' }).trim();
+    if (w) return w;
+  } catch {}
+  return 'claude';
+})();
+console.log(`[easyclaude] claude bin: ${CLAUDE_BIN}`);
+
 // ── auth process tracking (login OAuth 플로우 상태) ─────────────────────────
 const authProcs = new Map(); // home → { proc, url, status, output, error, exitCode }
 
@@ -386,6 +403,53 @@ function findStatePath(configPath) {
 }
 function ensureDir(p) {
   try { fs.mkdirSync(p, { recursive: true }); } catch {}
+}
+
+// ── Supervisor daemon ─────────────────────────────────────────────────────────
+// 단일 sup-daemon 프로세스가 모든 세션 관리. 기존 per-session supervisor.js 대체.
+const SUP_BASE_DIR   = path.join(XDG_DATA_HOME, 'easyclaude', 'sup');
+const DAEMON_SOCK    = path.join(SUP_BASE_DIR, '.daemon.sock');
+const DAEMON_PID_FILE = path.join(SUP_BASE_DIR, '.daemon.pid');
+
+function ensureDaemon() {
+  let alive = false;
+  try {
+    const pid = parseInt(fs.readFileSync(DAEMON_PID_FILE, 'utf8').trim(), 10);
+    if (pid > 0) { process.kill(pid, 0); alive = true; }
+  } catch {}
+  if (alive) return;
+  ensureDir(SUP_BASE_DIR);
+  try { fs.unlinkSync(DAEMON_SOCK); } catch {}
+  const daemonLog = path.join(SUP_BASE_DIR, '.daemon.log');
+  const out = fs.openSync(daemonLog, 'a');
+  const d = spawn(process.execPath, [path.join(__dirname, 'sup-daemon.js'), DAEMON_SOCK], {
+    detached: true, stdio: ['ignore', out, out],
+  });
+  d.unref();
+  fs.closeSync(out);
+  try { fs.writeFileSync(DAEMON_PID_FILE, String(d.pid)); } catch {}
+  console.log(`[easyclaude] sup-daemon spawned: pid=${d.pid}`);
+}
+
+function daemonSpawn(sid, sockPath, pidPath, cwd, args, childEnv) {
+  const conn = net.createConnection(DAEMON_SOCK);
+  conn.on('connect', () => {
+    conn.write(JSON.stringify({
+      op: 'spawn', sid, sockPath, pidPath, cwd, args,
+      env: { ...childEnv, _EC_CLAUDE_BIN: CLAUDE_BIN },
+    }) + '\n');
+    conn.end();
+  });
+  conn.on('error', err => console.error(`[easyclaude] daemon spawn error ${sid}: ${err.message}`));
+}
+
+function daemonDestroy(sid) {
+  const conn = net.createConnection(DAEMON_SOCK);
+  conn.on('connect', () => {
+    conn.write(JSON.stringify({ op: 'destroy', sid }) + '\n');
+    conn.end();
+  });
+  conn.on('error', () => {});
 }
 
 const cfgPath = findConfigPath();
@@ -1636,11 +1700,10 @@ const server = http.createServer((req, res) => {
         ch.debounceTimer = null;
         try {
           const snap = ch.parser.snapshot();
-          const json = JSON.stringify(snap.turns);
-          if (json !== ch.lastTurnsJson) {
-            ch.lastTurnsJson = json;
-            ch.broadcast({ op: 'turns', turns: snap.turns, usage: snap.session.usage });
-          }
+          // restart 직전 flush — full turns 강제 송신 (다음 EC가 reattach 후 다시 시작)
+          ch.broadcast({ op: 'turns', turns: snap.turns, usage: snap.session.usage });
+          ch.lastBroadcastLen = snap.turns.length;
+          ch.lastTailSig = '';
         } catch {}
       }
     }
@@ -2026,7 +2089,6 @@ function spawnSession(sess) {
       stderrLog: [],
       subscribers: new Map(),
       debounceTimer: null,
-      lastTurnsJson: '',
       claudeId: null,
       pendingDialogs: new Map(),
       alive: false,
@@ -2043,15 +2105,32 @@ function spawnSession(sess) {
         for (const cid of ids) wsLocal.send(JSON.stringify({ ...msg, id: cid }));
       }
     };
+    // 증분 broadcast — 매 turn마다 전체 array 전송하면 긴 세션에서 메모리/네트워크 폭발
+    // (Arche 21MB jsonl 사례). lastBroadcastLen 추적, 마지막 turn은 mutation 가능성 있어
+    // 항상 tail로 포함해 재전송.
+    ch.lastBroadcastLen = 0;
+    ch.lastTailSig = '';
     ch.scheduleTurns = () => {
       if (ch.debounceTimer) return;
       ch.debounceTimer = setTimeout(() => {
         ch.debounceTimer = null;
         const snap = ch.parser.snapshot();
-        const json = JSON.stringify(snap.turns);
-        if (json === ch.lastTurnsJson) return;
-        ch.lastTurnsJson = json;
-        ch.broadcast({ op: 'turns', turns: snap.turns, usage: snap.session.usage });
+        const total = snap.turns.length;
+        if (total === 0) return;
+        // tail 시작 인덱스: 마지막 broadcast된 turn 포함 (그 turn이 stream으로 수정됐을 수 있음)
+        const fromIdx = Math.max(0, ch.lastBroadcastLen - 1);
+        const tail = snap.turns.slice(fromIdx);
+        const tailSig = JSON.stringify(tail);
+        if (tailSig === ch.lastTailSig && total === ch.lastBroadcastLen) return;
+        ch.lastTailSig = tailSig;
+        ch.lastBroadcastLen = total;
+        ch.broadcast({
+          op: 'turns_patch',
+          from: fromIdx,
+          turns: tail,
+          total,
+          usage: snap.session.usage,
+        });
       }, 40);
     };
     ch.parser = new StreamParser({
@@ -2077,7 +2156,17 @@ function spawnSession(sess) {
       onTurnUpdate: () => ch.scheduleTurns(),
       onSystem: (session) => ch.broadcast({ op: 'system', session }),
       onUsage:  (usage)   => ch.broadcast({ op: 'usage', usage, lastCtxInput: ch.parser.snapshot().session.lastCtxInput }),
-      onResult: (result, usage) => ch.broadcast({ op: 'result', result, usage }),
+      onResult: (result, usage) => {
+        ch.broadcast({ op: 'result', result, usage });
+        ch.broadcast({ op: 'status', status: '' }); // thinking 상태 초기화
+      },
+      onCompactBoundary: () => {
+        // 압축 완료 — ec-system 메시지로 알림 (잠시 후, 스트림 안정화 대기)
+        setTimeout(() => {
+          if (ch.alive) sendUserText(ch, '<ec-system>대화가 압축됐습니다.</ec-system>');
+        }, 500);
+      },
+      onStatus: (status) => ch.broadcast({ op: 'status', status: status || '' }),
       onAskUserQuestion: ({ tool_use_id, input }) => {
         ch.pendingDialogs.set(tool_use_id, { input });
         ch.broadcast({ op: 'dialog', kind: 'AskUserQuestion', tool_use_id, input });
@@ -2204,6 +2293,8 @@ function handleClaudeExit(ch, exitCode, signal) {
   }
   const snap = ch.parser.snapshot();
   ch.broadcast({ op: 'turns', turns: snap.turns, usage: snap.session.usage });
+  ch.lastBroadcastLen = snap.turns.length;
+  ch.lastTailSig = '';
   ch.broadcast({ op: 'closed', exitCode, signal, stderr: ch.stderrLog.join('').slice(-2000) });
   ch.alive = false;
   ch.proc = null;
@@ -2237,35 +2328,13 @@ function attachSupervisor(sess, ch, args, childEnv) {
     }
   } catch (e) { console.log(`[easyclaude] sup pid read fail: ${sess.id} (${e.code})`); }
 
-  // reattach 시: supervisor가 이전 exit(143)를 replay할 수 있음 → 첫 번째 143은 억제
+  let reattaching = false;
   if (supAlive) {
-    ch._intentionalKill = true;
-    // EC 재시작 알림 — 2초 후 ec-system 메시지로 주입 (세션 준비 후)
-    setTimeout(() => {
-      console.log(`[easyclaude] ec-system inject: ${sess.id}`);
-      sendUserText(ch, '<ec-system>EC 서버가 재시작됐습니다.</ec-system>');
-    }, 2000);
-  }
-
-  if (!supAlive) {
-    // detached spawn 새 supervisor
-    try { fs.unlinkSync(sockPath); } catch {}
-    try { fs.unlinkSync(pidPath); } catch {}
-    const supArgs = [
-      path.join(__dirname, 'supervisor.js'),
-      sess.id, sockPath, pidPath, sess.cwd,
-      JSON.stringify(args), JSON.stringify(childEnv),
-    ];
-    const out = fs.openSync(logPath, 'a');
-    const supProc = spawn(process.execPath, supArgs, {
-      detached: true,
-      stdio: ['ignore', out, out],
-    });
-    supProc.unref();
-    fs.closeSync(out);
-    console.log(`[easyclaude] supervisor spawned: ${sess.id} pid=${supProc.pid} sock=${sockPath}`);
+    reattaching = true;
+    console.log(`[easyclaude] supervisor reattach attempt: ${sess.id} pid=${supPid} sock=${sockPath}`);
   } else {
-    console.log(`[easyclaude] supervisor reattach: ${sess.id} pid=${supPid} sock=${sockPath}`);
+    console.log(`[easyclaude] daemon spawn: ${sess.id}`);
+    daemonSpawn(sess.id, sockPath, pidPath, sess.cwd, args, childEnv);
   }
 
   // virtual proc 만들기
@@ -2298,7 +2367,33 @@ function attachSupervisor(sess, ch, args, childEnv) {
         if (!line) continue;
         let msg;
         try { msg = JSON.parse(line); } catch { continue; }
-        if (msg.op === 'hello') { virt.pid = msg.claudePid; }
+        if (msg.op === 'hello') {
+          virt.pid = msg.claudePid;
+          // reattach 했는데 supervisor가 이미 claude를 잃은 좀비 상태이면
+          // 무한 respawn 루프 방지 위해 봉인된 supervisor를 죽이고 새로 spawn.
+          const claudeAlive = msg.alive !== undefined ? msg.alive : !msg.exited; // 구형 호환
+          if (!claudeAlive) {
+            // claude 죽음 (daemon이 명시적으로 alive=false 전달)
+            console.warn(`[easyclaude] supervisor zombie: ${sess.id} pid=${supPid} → daemon respawn`);
+            reattaching = false;
+            try { sock.destroy(); } catch {}
+            if (supPid > 0) try { process.kill(supPid, 'SIGKILL'); } catch {}
+            daemonDestroy(sess.id);
+            setTimeout(() => {
+              daemonSpawn(sess.id, sockPath, pidPath, sess.cwd, args, childEnv);
+              connectSocket(30);
+            }, 300);
+            return;
+          }
+          if (reattaching) {
+            console.log(`[easyclaude] supervisor reattach OK (claude alive pid=${msg.claudePid}): ${sess.id}`);
+            ch._intentionalKill = false;
+            setTimeout(() => {
+              console.log(`[easyclaude] ec-system inject: ${sess.id}`);
+              sendUserText(ch, '<ec-system>EC 서버가 재시작됐습니다.</ec-system>');
+            }, 2000);
+          }
+        }
         else if (msg.op === 'stdout') handleClaudeStdout(ch, msg.data);
         else if (msg.op === 'stderr') handleClaudeStderr(ch, msg.data);
         else if (msg.op === 'exit') {
@@ -2423,7 +2518,13 @@ wss.on('connection', ws => {
       if (!label || !cwd) {
         return send({ op: 'error', id, message: 'label and cwd are required' });
       }
-      const slug = String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'session';
+      try {
+        if (!fs.statSync(cwd).isDirectory()) throw new Error('not a directory');
+      } catch {
+        return send({ op: 'error', id, message: `cwd가 존재하지 않습니다: ${cwd}`, code: 'cwd_not_found' });
+      }
+      const slugRaw = String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+      const slug = slugRaw || randomUUID().slice(0, 8);
       let newId = slug;
       let i = 1;
       while (findSession(newId)) newId = `${slug}-${++i}`;
@@ -2798,7 +2899,12 @@ function shutdown() {
     } catch {}
   }
   pendingPermissions.clear();
-  for (const ch of ptyChannels.values()) { try { ch.proc.kill(); } catch {} }
+  // daemon 모드: claude는 daemon이 보관 — EC 종료 시 죽이지 않음.
+  // daemon 비활성(legacy) 모드에서만 직접 kill.
+  const supervisorEnabled = !(cfg && cfg.supervisor && cfg.supervisor.enabled === false);
+  if (!supervisorEnabled) {
+    for (const ch of ptyChannels.values()) { try { ch.proc.kill(); } catch {} }
+  }
   ptyChannels.clear();
   process.exit(0);
 }
@@ -2808,6 +2914,9 @@ process.on('SIGINT',  shutdown);
 server.listen(PORT, HOST, () => {
   console.log(`[easyclaude] ${HOST}:${PORT}`);
   console.log(`[easyclaude] sessions: ${sessions().map(s => s.id).join(', ') || '(none)'}`);
+  // supervisor daemon 시작 (없으면 spawn)
+  const supervisorEnabled = !(cfg && cfg.supervisor && cfg.supervisor.enabled === false);
+  if (supervisorEnabled) ensureDaemon();
   // 플러그인 로드 (서버 ready 후)
   loadPlugins({ sessionState, saveState, ptyChannels, sendUserText });
 });

@@ -470,6 +470,28 @@ function onMsg(msg) {
     if (ch.sessionId === activeSid) { renderActive(); renderUsage(); }
     return;
   }
+  if (op === 'turns_patch') {
+    // 증분 turns 업데이트 — 서버가 from 인덱스부터 tail만 보냄.
+    // 긴 세션에서 매 턴마다 전체 array 전송하던 메모리/네트워크 폭발 회피.
+    if (!ch) return;
+    const from = msg.from | 0;
+    const patch = msg.turns || [];
+    // ch.turns 가 from 보다 짧으면 sync drift — 서버에 full 재요청
+    if (ch.turns.length < from) {
+      sendWs({ op: 'open', id: ch.id, sid: ch.sessionId });
+      return;
+    }
+    ch.turns.splice(from, ch.turns.length - from, ...patch);
+    ch.usage = msg.usage || ch.usage;
+    if (ch.stalled && ch.turns.length) ch.stalled = null;
+    if (ch.pendingInputs?.length) {
+      const confirmed = ch.pendingInputs.filter(p => ch.turns.some(t => t.type === 'human' && t.body === p.text));
+      confirmed.forEach(p => { if (p.draftKey) localStorage.removeItem(p.draftKey); });
+      ch.pendingInputs = ch.pendingInputs.filter(p => !ch.turns.some(t => t.type === 'human' && t.body === p.text));
+    }
+    if (ch.sessionId === activeSid) { renderActive(); renderUsage(); }
+    return;
+  }
   if (op === 'system') {
     if (ch) {
       const prevTitle = ch.session?.customTitle || null;
@@ -491,7 +513,7 @@ function onMsg(msg) {
     return;
   }
   if (op === 'result') {
-    if (ch) ch.lastResult = msg.result;
+    if (ch) { ch.lastResult = msg.result; ch.statusText = ''; }
     return;
   }
   if (op === 'dialog') {
@@ -506,6 +528,7 @@ function onMsg(msg) {
   }
   if (op === 'closed') {
     if (ch) {
+      ch.statusText = '';
       ch.alive = false;
       const err = ((msg.stderr || '') + ' ' + (msg.error || '')).toLowerCase();
       if (/not logged in|authentication|credentials|please log in|invalid api key|auth/.test(err)) {
@@ -560,8 +583,25 @@ function onMsg(msg) {
     if (ch && ch.sessionId === activeSid) showToast('세션 재기동 완료', 'ok');
     return;
   }
+  if (op === 'status') {
+    if (!ch) return;
+    const STATUS_LABELS = { requesting: '생각 중...', processing: '처리 중...' };
+    ch.statusText = STATUS_LABELS[msg.status] || (msg.status || '');
+    if (ch.sessionId === activeSid) {
+      // DOM 직접 업데이트 — thinking dots 안의 status span만 갱신
+      const el = document.querySelector('.ec-thinking-status');
+      if (el) el.textContent = ch.statusText;
+      else if (ch.statusText) renderActive();
+    }
+    return;
+  }
   if (op === 'error') {
-    console.error('[easyclaude]', msg.message);
+    const code = msg.code || '';
+    if (code === 'cwd_not_found' || (msg.message || '').includes('cwd')) {
+      showToast(msg.message || '오류', 'err', 4000);
+    } else {
+      console.error('[easyclaude]', msg.message);
+    }
     return;
   }
 }
@@ -1571,6 +1611,7 @@ function renderActive() {
       <div class="ec-turn-label" style="color:${COLORS.assistant||'var(--green)'}">${esc(sessLabel)}</div>
       <div class="ec-turn-body ec-thinking-dots">
         <span></span><span></span><span></span>
+        ${ch.statusText ? `<em class="ec-thinking-status">${esc(ch.statusText)}</em>` : ''}
       </div>
     </div>` : isRestarting ? `
     <div class="ec-turn ec-turn-assistant">
