@@ -75,13 +75,8 @@ proc.on('exit', (code, signal) => {
   exited = true;
   exitInfo = { code, signal };
   broadcast({ op: 'exit', code, signal });
-  // 연결된 모든 ec server에게 알린 뒤 1초 후 supervisor 종료
-  setTimeout(() => {
-    for (const c of conns) try { c.end(); } catch {}
-    try { fs.unlinkSync(SOCK); } catch {}
-    try { fs.unlinkSync(PIDF); } catch {}
-    process.exit(code == null ? 0 : code);
-  }, 1000);
+  // supervisor는 계속 살아있음 — EC 재시작 후 reattach + claude 재스폰을 기다림
+  // (종료 + pid 삭제하지 않음. EC가 reattach 후 새 claude를 스폰함)
 });
 proc.on('error', err => {
   console.error('[supervisor]', SID, 'spawn error:', err.message);

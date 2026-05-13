@@ -2231,8 +2231,11 @@ function attachSupervisor(sess, ch, args, childEnv) {
   try {
     const txt = fs.readFileSync(pidPath, 'utf8').trim();
     supPid = parseInt(txt, 10);
-    if (supPid > 0) { try { process.kill(supPid, 0); supAlive = true; } catch {} }
-  } catch {}
+    if (supPid > 0) {
+      try { process.kill(supPid, 0); supAlive = true; }
+      catch (e) { console.log(`[easyclaude] sup check DEAD: ${sess.id} pid=${supPid} (${e.code})`); }
+    }
+  } catch (e) { console.log(`[easyclaude] sup pid read fail: ${sess.id} (${e.code})`); }
 
   // reattach 시: supervisor가 이전 exit(143)를 replay할 수 있음 → 첫 번째 143은 억제
   if (supAlive) {
