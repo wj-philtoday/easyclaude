@@ -1627,14 +1627,34 @@ const server = http.createServer((req, res) => {
       res.writeHead(500, {'Content-Type':'application/json'});
       return res.end(JSON.stringify({ error: 'restart.sh not found' }));
     }
-    const out = fs.openSync('/tmp/easyclaude-restart.log', 'a');
-    const p = spawn('setsid', ['bash', restartScript], {
-      detached: true, stdio: ['ignore', out, out], cwd: path.join(__dirname, '..'),
-    });
-    p.unref();
-    fs.closeSync(out);
     res.writeHead(200, {'Content-Type':'application/json'});
-    return res.end(JSON.stringify({ ok: true, scheduled: true, hint: '약 3초 후 ec server 재기동' }));
+    res.end(JSON.stringify({ ok: true, scheduled: true, hint: '약 3초 후 ec server 재기동' }));
+    // graceful flush — 재시동 전 모든 채널의 pending turns 강제 브로드캐스트 후 state 저장
+    for (const ch of ptyChannels.values()) {
+      if (ch.debounceTimer) {
+        clearTimeout(ch.debounceTimer);
+        ch.debounceTimer = null;
+        try {
+          const snap = ch.parser.snapshot();
+          const json = JSON.stringify(snap.turns);
+          if (json !== ch.lastTurnsJson) {
+            ch.lastTurnsJson = json;
+            ch.broadcast({ op: 'turns', turns: snap.turns, usage: snap.session.usage });
+          }
+        } catch {}
+      }
+    }
+    saveState(sessionState);
+    // 500ms 대기 후 재시동 (flush 완료 보장)
+    setTimeout(() => {
+      const out = fs.openSync('/tmp/easyclaude-restart.log', 'a');
+      const p = spawn('setsid', ['bash', restartScript], {
+        detached: true, stdio: ['ignore', out, out], cwd: path.join(__dirname, '..'),
+      });
+      p.unref();
+      fs.closeSync(out);
+    }, 500);
+    return;
   }
 
   // /api/ec-config — ec 자체 설정(cfg.json) GET/PUT
