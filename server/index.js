@@ -1,6 +1,6 @@
 'use strict';
 // easyclaude server — claude를 직접 stream-json 모드로 spawn하는 단일 파이프라인.
-// tmux/ANSI 파이프라인은 제거 (ansi.js/screen.js/parser.js 파일은 디버그용으로 디스크에만 보존).
+// tmux/ANSI 파이프라인 제거됨 (참고용 코드는 /opt/easyclaude/legacy/).
 
 const { WebSocketServer } = require('ws');
 const { spawn } = require('child_process');
@@ -10,10 +10,10 @@ const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const os = require('os');
-const { StreamParser } = require('./stream-parser');
+const { processLine } = require('./event-stream');
 
 // ── 플러그인 로더 ────────────────────────────────────────────────────────────
-const PLUGINS_DIR = path.join(__dirname, 'plugins');
+const PLUGINS_DIR = path.join(__dirname, '..', 'plugins');
 const plugins = [];
 function loadPlugins(ecApi) {
   if (!fs.existsSync(PLUGINS_DIR)) return;
@@ -62,11 +62,11 @@ const authProcs = new Map(); // home → { proc, url, status, output, error, exi
 
 // ── ec native OAuth token 저장 (setup-token 결과 보관) ─────────────────────
 // claude setup-token 은 토큰을 stdout으로 출력만 하고 .credentials.json에 저장하지 않음.
-// ec는 그 토큰을 추출해서 XDG data dir 안 oauth_tokens.json 에 home별로 보관하고,
+// ec는 그 토큰을 추출해서 ~/.easyclaude/oauth_tokens.json 에 home별로 보관하고,
 // claude spawn 또는 auth status 호출 시 CLAUDE_CODE_OAUTH_TOKEN 환경변수로 주입한다.
 function _ecTokensPath() {
-  const xdgData = process.env.XDG_DATA_HOME || path.join(process.env.HOME || '/tmp', '.local', 'share');
-  return path.join(xdgData, 'easyclaude', 'oauth_tokens.json');
+  const home = process.env.HOME || '/tmp';
+  return path.join(home, '.easyclaude', 'oauth_tokens.json');
 }
 function loadEcTokens() {
   try { return JSON.parse(fs.readFileSync(_ecTokensPath(), 'utf8')); } catch { return {}; }
@@ -93,17 +93,16 @@ function deleteEcToken(home) {
 }
 function hasCredentialsJson(home) {
   try {
-    const p = path.join(home, '.claude', '.credentials.json');
-    return fs.existsSync(p);
+    // ec home(CLAUDE_CONFIG_DIR) 직접 또는 real HOME의 .claude/ 둘 다 체크
+    return fs.existsSync(path.join(home, '.credentials.json'))
+        || fs.existsSync(path.join(home, '.claude', '.credentials.json'));
   } catch { return false; }
 }
 const OAUTH_TOKEN_RE = /\bsk-ant-oat\d+-[A-Za-z0-9_-]{30,}/;
 
-// 세션이 jsonl을 찾아야 할 HOME 후보 — overlay HOME 우선
+// 세션이 jsonl을 찾아야 할 HOME 후보 — real HOME만 사용 (projects는 ~/.claude/projects)
 function homesForSession(sess) {
-  const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
-  const overlayHome = path.join(XDG_DATA_HOME, 'easyclaude', 'overlay');
-  return [sess?.home, overlayEnabled ? overlayHome : null, process.env.HOME].filter(Boolean);
+  return [sess?.home, process.env.HOME].filter(Boolean);
 }
 
 // scope·kind 별 설정 파일 경로 결정 — claude code의 실제 저장 위치에 맞춤.
@@ -119,7 +118,7 @@ function homesForSession(sess) {
 function resolveScopeFile(scope, kind, cwd, ovHome) {
   if (kind === 'skill') {
     const dir = (
-      scope === 'user' ? path.join(ovHome, '.claude') :
+      scope === 'user' ? ovHome :
       scope === 'project' && cwd ? path.join(cwd, '.claude') :
       scope === 'local' && cwd ? path.join(cwd, '.claude') :
       null
@@ -142,19 +141,86 @@ function resolveScopeFile(scope, kind, cwd, ovHome) {
 }
 
 // jsonl → turns 캐시 (대화창 위 스크롤 history용)
-const _jsonlTurnsCache = new Map(); // jsonlPath → { mtime, turns }
-function jsonlToTurns(jsonlPath) {
-  const stat = fs.statSync(jsonlPath);
-  const cached = _jsonlTurnsCache.get(jsonlPath);
-  if (cached && cached.mtime === stat.mtimeMs) return cached.turns;
-  const parser = new StreamParser({});
-  const raw = fs.readFileSync(jsonlPath, 'utf8');
-  for (const line of raw.split('\n')) {
-    if (line) parser.feedLine(line);
+const _jsonlEventsCache = new Map(); // jsonlPath → { mtime, events }
+// active branch만 선별 — Claude JSONL은 rewind/branch마다 entry가 누적되므로
+// 마지막 entry부터 parentUuid 역추적하여 살아있는 conversation chain만 추출.
+// uuid 없는 meta entry(custom-title, attachment 등)는 timestamp 기준으로 끼워넣음.
+function filterActiveBranch(raws) {
+  // 1) JSON parse + index 부착
+  const parsed = [];
+  for (let i = 0; i < raws.length; i++) {
+    const line = raws[i].trim();
+    if (!line) continue;
+    try { parsed.push({ idx: i, obj: JSON.parse(line) }); } catch {}
   }
-  const turns = parser.snapshot().turns;
-  _jsonlTurnsCache.set(jsonlPath, { mtime: stat.mtimeMs, turns });
-  return turns;
+  if (!parsed.length) return raws;
+  // 2) uuid → entry, 그리고 leaf 후보(uuid는 있고 children이 없는 entry) 찾기
+  const byUuid = new Map();
+  const hasChild = new Set();
+  for (const p of parsed) {
+    const u = p.obj.uuid;
+    if (u) byUuid.set(u, p);
+    const pu = p.obj.parentUuid;
+    if (pu) hasChild.add(pu);
+  }
+  // leaf = uuid 있고 children 없는 entry 중 timestamp 최신
+  let leaf = null, leafTs = '';
+  for (const p of parsed) {
+    if (!p.obj.uuid || hasChild.has(p.obj.uuid)) continue;
+    const ts = p.obj.timestamp || '';
+    if (ts > leafTs) { leaf = p; leafTs = ts; }
+  }
+  if (!leaf) return raws; // fallback: 그냥 전체
+  // 3) leaf부터 parentUuid 역추적 → active uuid set
+  const activeUuids = new Set();
+  let cur = leaf;
+  while (cur && cur.obj.uuid && !activeUuids.has(cur.obj.uuid)) {
+    activeUuids.add(cur.obj.uuid);
+    cur = byUuid.get(cur.obj.parentUuid);
+  }
+  // 4) raws 순서대로: uuid 있으면 activeUuids에 있는 것만, 없으면(메타) 모두 유지
+  const out = [];
+  for (const p of parsed) {
+    if (p.obj.uuid) {
+      if (activeUuids.has(p.obj.uuid)) out.push(raws[p.idx]);
+    } else {
+      out.push(raws[p.idx]); // 메타 entry는 통과
+    }
+  }
+  return out;
+}
+
+function jsonlToEvents(jsonlPath) {
+  const stat = fs.statSync(jsonlPath);
+  const cached = _jsonlEventsCache.get(jsonlPath);
+  if (cached && cached.mtime === stat.mtimeMs) return cached.events;
+  const events = [];
+  const raw = fs.readFileSync(jsonlPath, 'utf8');
+  const rawLines = raw.split('\n');
+  const activeLines = filterActiveBranch(rawLines);
+  for (const line of activeLines) {
+    if (line.trim()) processLine(line, { onEvent: e => events.push(e) });
+  }
+  _jsonlEventsCache.set(jsonlPath, { mtime: stat.mtimeMs, events });
+  return events;
+}
+// 하위호환 alias
+function jsonlToTurns(jsonlPath) { return jsonlToEvents(jsonlPath); }
+
+// args 배열에서 특정 플래그를 교체/추가하는 헬퍼
+function patchArgs(args, overrides) {
+  const result = [...args];
+  if (overrides.permissionMode != null) {
+    const idx = result.indexOf('--permission-mode');
+    if (idx >= 0) result.splice(idx, 2);
+    if (overrides.permissionMode !== 'default') result.push('--permission-mode', overrides.permissionMode);
+  }
+  if (overrides.model != null) {
+    const idx = result.indexOf('--model');
+    if (idx >= 0) result.splice(idx, 2);
+    result.push('--model', overrides.model);
+  }
+  return result;
 }
 
 // claude (login / setup-token)는 TTY를 기대 → script(1)로 PTY wrap.
@@ -224,105 +290,150 @@ function tryCaptureOAuthUrl(state) {
   }
 }
 
-// ── HOME overlay (ec가 spawn할 claude의 ~/.claude/* 격리) ───────────────────
-// 기본 ON — ec는 단일 자체 HOME(overlay)으로 claude를 spawn한다.
-// cfg.overlay.enabled === false 명시 시에만 비활성 (real HOME 사용).
-// overlay HOME 경로: $XDG_DATA_HOME/easyclaude/overlay/
-//   .claude/
-//     settings.json   ← /opt/easyclaude/data/settings.json 복사 (없을 때만)
-//     CLAUDE.md       ← /opt/easyclaude/data/CLAUDE.md base + cfg.overlay.claudeMd 합성
-//     skills/         ← /opt/easyclaude/data/skills/* 심볼릭 (디렉토리 단위)
-//     credentials.json ← 자동 생성 안 함. ec 내에서 첫 `/login`으로 채워짐.
-// project-level (<cwd>/.claude/*)은 claude code가 cwd 자동 탐색 — 따로 안 건드림.
-function ensureOverlayHome(realHome) {
-  const xdgData = process.env.XDG_DATA_HOME || path.join(realHome, '.local', 'share');
-  const ovDir = path.join(xdgData, 'easyclaude', 'overlay');
-  const ovClaude = path.join(ovDir, '.claude');
-  try { fs.mkdirSync(ovClaude, { recursive: true }); } catch {}
+// ── EC home (~/.easyclaude/) — CLAUDE_CONFIG_DIR로 사용 ───────────────────
+// HOME은 real HOME 그대로 두고, ~/.claude/ 역할은 ~/.easyclaude/로 격리.
+// ~/.easyclaude/
+//   settings.json    ← /opt/easyclaude/pkg/settings.json 시드 (없을 때만)
+//   skills/          ← /opt/easyclaude/pkg/skills/* 심볼릭
+//   projects/        ← ~/.claude/projects/ 심볼릭 (대화 jsonl 공유)
+//   tmp/             ← CLAUDE_CODE_TMPDIR 기본값
+//   EC.env           ← EC가 childEnv에 병합할 환경변수 (사용자 편집 가능)
+//   .claude.json     ← mcpServers 등 user-scope 설정 (real ~/.claude.json에서 시드)
+function ensureEcHome(realHome) {
+  const ecHome = path.join(realHome, '.easyclaude');
+  try { fs.mkdirSync(ecHome, { recursive: true }); } catch {}
 
   const pkgRoot = path.join(__dirname, '..');
-  const pkgData = path.join(pkgRoot, 'data');
-  const pkgSettings = path.join(pkgData, 'settings.json');
-  const pkgCMd     = path.join(pkgData, 'CLAUDE.md');
-  const pkgSkills  = path.join(pkgData, 'skills');
+  const pkgDir = path.join(pkgRoot, 'pkg');
+  const pkgSettings = path.join(pkgDir, 'settings.json');
+  const pkgSkills   = path.join(pkgDir, 'skills');
 
-  // 1) settings.json — 없으면 패키지 데이터 복사 (있으면 사용자의 ec 편집 보존)
-  const ovSettings = path.join(ovClaude, 'settings.json');
-  if (!fs.existsSync(ovSettings) && fs.existsSync(pkgSettings)) {
-    try { fs.copyFileSync(pkgSettings, ovSettings); } catch {}
+  // 1) settings.json — 패키지 시드 (없을 때만)
+  const ecSettings = path.join(ecHome, 'settings.json');
+  if (!fs.existsSync(ecSettings) && fs.existsSync(pkgSettings)) {
+    try { fs.copyFileSync(pkgSettings, ecSettings); } catch {}
   }
 
-  // 2) CLAUDE.md — base + @-refs (cfg.overlay.claudeMd.refs.user 등)
-  const ovCfg = (cfg && cfg.overlay) || {};
-  const cmdCfg = (ovCfg.claudeMd) || {};
-  const refs = cmdCfg.refs || {};
-  let base = cmdCfg.base;
-  if (!base && fs.existsSync(pkgCMd)) base = fs.readFileSync(pkgCMd, 'utf8');
-  if (!base) base = '# easyclaude default context\n';
-  const lines = [base.replace(/\n+$/, '')];
-  if (refs.user)    lines.push('', `@${realHome}/.claude/CLAUDE.md`);
-  // project/cwd CLAUDE.md는 claude가 cwd 기반으로 자동 탐색 — @ 참조 불필요.
-  // 단 cfg.overlay.claudeMd.extraRefs (절대 경로 배열) 지원
-  if (Array.isArray(cmdCfg.extraRefs)) {
-    for (const r of cmdCfg.extraRefs) lines.push('', `@${r}`);
-  }
-  try { fs.writeFileSync(path.join(ovClaude, 'CLAUDE.md'), lines.join('\n') + '\n'); } catch {}
-
-  // 3) skills — 패키지 번들을 항목 단위로 심볼릭
-  const ovSkills = path.join(ovClaude, 'skills');
-  try { fs.mkdirSync(ovSkills, { recursive: true }); } catch {}
+  // 2) skills — 패키지 번들 심볼릭
+  const ecSkills = path.join(ecHome, 'skills');
+  try { fs.mkdirSync(ecSkills, { recursive: true }); } catch {}
   if (fs.existsSync(pkgSkills)) {
     let entries = [];
     try { entries = fs.readdirSync(pkgSkills); } catch {}
     for (const name of entries) {
       const src = path.join(pkgSkills, name);
-      const dst = path.join(ovSkills, name);
-      try {
-        const st = fs.lstatSync(dst);
-        if (st.isSymbolicLink()) continue; // 이미 있음
-        // 다른 파일/디렉토리가 있으면 건드리지 않음
-        continue;
-      } catch {
+      const dst = path.join(ecSkills, name);
+      try { fs.lstatSync(dst); } catch {
         try { fs.symlinkSync(src, dst, 'dir'); } catch {}
       }
     }
   }
 
-  // 4) projects — real HOME의 .claude/projects/ 를 그대로 공유 (대화 jsonl 계승).
-  //    ec HOME은 스킬/플러그인/credentials 격리용이고, 대화 기록은 cwd 기반 projects를 공유.
-  const ovProjects = path.join(ovClaude, 'projects');
+  // 3) projects — real ~/.claude/projects/ 심볼릭
+  const ecProjects = path.join(ecHome, 'projects');
   const realProjects = path.join(realHome, '.claude', 'projects');
-  try {
-    fs.lstatSync(ovProjects);
-    // 이미 존재 — symlink든 dir이든 건드리지 않음
-  } catch {
+  try { fs.lstatSync(ecProjects); } catch {
     if (fs.existsSync(realProjects)) {
-      try { fs.symlinkSync(realProjects, ovProjects, 'dir'); }
+      try { fs.symlinkSync(realProjects, ecProjects, 'dir'); }
       catch (e) { console.error(`[easyclaude] projects symlink fail: ${e.message}`); }
     }
   }
 
-  // 5) overlay .claude.json — real HOME의 .claude.json에서 user-scope 설정 머지 (mcpServers/플러그인 등).
-  //    overlay에 .claude.json이 없을 때만 시드. 이후엔 ec/사용자가 직접 관리.
-  const ovClaudeJson = path.join(ovDir, '.claude.json');
+  // 4) tmp/
+  try { fs.mkdirSync(path.join(ecHome, 'tmp'), { recursive: true }); } catch {}
+
+  // 5) env.json — 사용자 override 값 (없을 때만 빈 객체 시드)
+  //    실제 변수 목록은 패키지 env-schema.json에 정적으로 정의. UI는 schema 보고 렌더.
+  const ecEnvJson = path.join(ecHome, 'env.json');
+  if (!fs.existsSync(ecEnvJson)) {
+    try { fs.writeFileSync(ecEnvJson, JSON.stringify({ overrides: {}, extraFiles: [] }, null, 2)); } catch {}
+  }
+
+  // 6) .claude.json — real ~/.claude.json에서 user-scope 시드 (없을 때만)
+  const ecClaudeJson = path.join(ecHome, '.claude.json');
   const realClaudeJson = path.join(realHome, '.claude.json');
-  if (!fs.existsSync(ovClaudeJson) && fs.existsSync(realClaudeJson)) {
+  if (!fs.existsSync(ecClaudeJson) && fs.existsSync(realClaudeJson)) {
     try {
       const real = JSON.parse(fs.readFileSync(realClaudeJson, 'utf8'));
-      // 사용자 scope에 해당하는 필드만 시드 — cache/onboarding 등은 overlay 자체 생성.
       const seed = {};
       const carry = ['mcpServers', 'enabledPlugins', 'disabledPlugins', 'plugins', 'enabledMcpjsonServers', 'disabledMcpjsonServers', 'enableAllProjectMcpServers'];
       for (const k of carry) if (real[k] != null) seed[k] = real[k];
       if (Object.keys(seed).length) {
-        fs.writeFileSync(ovClaudeJson, JSON.stringify(seed, null, 2), { mode: 0o600 });
-        console.log(`[easyclaude] overlay .claude.json seeded with ${Object.keys(seed).join(',')}`);
+        fs.writeFileSync(ecClaudeJson, JSON.stringify(seed, null, 2), { mode: 0o600 });
+        console.log(`[easyclaude] ec .claude.json seeded with ${Object.keys(seed).join(',')}`);
       }
     } catch (e) {
-      console.error(`[easyclaude] overlay .claude.json seed fail: ${e.message}`);
+      console.error(`[easyclaude] ec .claude.json seed fail: ${e.message}`);
     }
   }
 
-  return ovDir;
+  return ecHome;
+}
+
+// ── env 파일 파서 (extraFiles용 KEY=VALUE 텍스트) ─────────────────────────
+function loadEnvFile(filePath) {
+  const out = {};
+  if (!fs.existsSync(filePath)) return out;
+  try {
+    const text = fs.readFileSync(filePath, 'utf8');
+    for (const raw of text.split('\n')) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq < 0) continue;
+      const key = line.slice(0, eq).trim();
+      let val = line.slice(eq + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (key) out[key] = val;
+    }
+  } catch (e) {
+    console.error(`[easyclaude] env file load fail ${filePath}: ${e.message}`);
+  }
+  return out;
+}
+
+// 패키지 env-schema.json 로드 (정적 변수 목록)
+let _cachedEnvSchema = null;
+function loadEnvSchema() {
+  if (_cachedEnvSchema) return _cachedEnvSchema;
+  const schemaPath = path.join(__dirname, '..', 'pkg', 'env-schema.json');
+  try {
+    _cachedEnvSchema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
+  } catch (e) {
+    console.error(`[easyclaude] env-schema.json load fail: ${e.message}`);
+    _cachedEnvSchema = { vars: [] };
+  }
+  return _cachedEnvSchema;
+}
+
+// 최종 env 병합 — schema 기본값 + 사용자 override + extraFiles
+//   schema.default가 빈 문자열("")인 항목은 생략(CC 기본값 사용).
+function loadEcEnv(ecHome) {
+  const schema = loadEnvSchema();
+  const env = {};
+  // 1) schema 기본값 (빈 문자열 default는 주입 안 함)
+  for (const v of (schema.vars || [])) {
+    if (v.default !== '' && v.default != null) env[v.key] = String(v.default);
+  }
+  // 2) 사용자 override (env.json)
+  const envJsonPath = path.join(ecHome, 'env.json');
+  let userCfg = { overrides: {}, extraFiles: [] };
+  if (fs.existsSync(envJsonPath)) {
+    try { userCfg = { ...userCfg, ...JSON.parse(fs.readFileSync(envJsonPath, 'utf8')) }; } catch {}
+  }
+  for (const [k, v] of Object.entries(userCfg.overrides || {})) {
+    if (v === '' || v == null) delete env[k]; // 빈 값 = unset
+    else env[k] = String(v);
+  }
+  // 3) extraFiles (사용자 지정 추가 env 텍스트 파일들)
+  for (const f of (userCfg.extraFiles || [])) {
+    Object.assign(env, loadEnvFile(f));
+  }
+  // 4) 동적 기본값 — CLAUDE_CODE_TMPDIR이 미설정이면 ecHome/tmp
+  if (!env.CLAUDE_CODE_TMPDIR) env.CLAUDE_CODE_TMPDIR = path.join(ecHome, 'tmp');
+  return env;
 }
 
 // ── 응답 포맷 강제 (--append-system-prompt) ────────────────────────────────
@@ -374,8 +485,8 @@ function maybeBashShortcut(text) {
 // 우선순위:
 //   config: $EASYCLAUDE_CONFIG → ./easyclaude.config.json → $XDG_CONFIG_HOME/easyclaude/config.json
 //           → ~/.config/easyclaude/config.json → /etc/easyclaude/config.json
-//   state : $EASYCLAUDE_STATE  → <config>.state.json (legacy) → $XDG_DATA_HOME/easyclaude/state.json
-//           → ~/.local/share/easyclaude/state.json
+//   state : $EASYCLAUDE_STATE  → ~/.easyclaude/state.json (현행)
+//           → $XDG_DATA_HOME/easyclaude/state.json (legacy 마이그레이션 대상)
 const HOME = process.env.HOME || '/tmp';
 const XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME || path.join(HOME, '.config');
 const XDG_DATA_HOME   = process.env.XDG_DATA_HOME   || path.join(HOME, '.local', 'share');
@@ -394,62 +505,108 @@ function findConfigPath() {
 }
 function findStatePath(configPath) {
   if (process.env.EASYCLAUDE_STATE) return process.env.EASYCLAUDE_STATE;
-  // legacy: config 옆 .state.json
-  if (configPath) {
-    const legacy = configPath.replace(/\.json$/, '.state.json');
-    if (fs.existsSync(legacy)) return legacy;
+  const ecHomeState = path.join(HOME, '.easyclaude', 'state.json');
+  const xdgState    = path.join(XDG_DATA_HOME, 'easyclaude', 'state.json');
+  // 마이그레이션: ec home에 없고 XDG에 있으면 ec home으로 이동
+  if (!fs.existsSync(ecHomeState) && fs.existsSync(xdgState)) {
+    try {
+      ensureDir(path.dirname(ecHomeState));
+      fs.renameSync(xdgState, ecHomeState);
+      console.log(`[easyclaude] state migrated: ${xdgState} → ${ecHomeState}`);
+    } catch (e) {
+      console.error(`[easyclaude] state migrate fail: ${e.message}`);
+    }
   }
-  return path.join(XDG_DATA_HOME, 'easyclaude', 'state.json');
+  // 또 다른 legacy: config 옆 .state.json
+  if (!fs.existsSync(ecHomeState) && configPath) {
+    const legacy = configPath.replace(/\.json$/, '.state.json');
+    if (fs.existsSync(legacy)) {
+      try {
+        ensureDir(path.dirname(ecHomeState));
+        fs.renameSync(legacy, ecHomeState);
+        console.log(`[easyclaude] state migrated (legacy): ${legacy} → ${ecHomeState}`);
+      } catch {}
+    }
+  }
+  return ecHomeState;
 }
 function ensureDir(p) {
   try { fs.mkdirSync(p, { recursive: true }); } catch {}
 }
 
-// ── Supervisor daemon ─────────────────────────────────────────────────────────
-// 단일 sup-daemon 프로세스가 모든 세션 관리. 기존 per-session supervisor.js 대체.
-const SUP_BASE_DIR   = path.join(XDG_DATA_HOME, 'easyclaude', 'sup');
-const DAEMON_SOCK    = path.join(SUP_BASE_DIR, '.daemon.sock');
-const DAEMON_PID_FILE = path.join(SUP_BASE_DIR, '.daemon.pid');
+// ── Supervisor ───────────────────────────────────────────────────────────────
+// 단일 supervisor 프로세스가 모든 claude 세션 관리.
+// 서버와 관리 소켓으로 통신; 세션 I/O는 per-session 소켓.
+const SUP_DIR      = path.join(HOME, '.easyclaude', 'sup');
+const SUP_MGMT_SOCK = path.join(SUP_DIR, '.supervisor.sock');
+const SUP_PID_FILE  = path.join(SUP_DIR, '.supervisor.pid');
 
-function ensureDaemon() {
+// 서버 재시작 시 supervisor가 전달한 "살아있던 세션" 목록
+// → 재연결 후 ec-system inject 여부 판단에 사용
+const supervisorAliveSids = new Set();
+let supMgmtConn = null;
+let supMgmtBuf  = '';
+
+function ensureSupervisor() {
   let alive = false;
   try {
-    const pid = parseInt(fs.readFileSync(DAEMON_PID_FILE, 'utf8').trim(), 10);
+    const pid = parseInt(fs.readFileSync(SUP_PID_FILE, 'utf8').trim(), 10);
     if (pid > 0) { process.kill(pid, 0); alive = true; }
   } catch {}
-  if (alive) return;
-  ensureDir(SUP_BASE_DIR);
-  try { fs.unlinkSync(DAEMON_SOCK); } catch {}
-  const daemonLog = path.join(SUP_BASE_DIR, '.daemon.log');
-  const out = fs.openSync(daemonLog, 'a');
-  const d = spawn(process.execPath, [path.join(__dirname, 'sup-daemon.js'), DAEMON_SOCK], {
-    detached: true, stdio: ['ignore', out, out],
-  });
-  d.unref();
+  if (alive) { return; }
+  ensureDir(SUP_DIR);
+  const supLog = path.join(SUP_DIR, '.supervisor.log');
+  const out = fs.openSync(supLog, 'a');
+  const s = spawn(process.execPath,
+    [path.join(__dirname, 'supervisor.js'), SUP_MGMT_SOCK, SUP_PID_FILE],
+    { detached: true, stdio: ['ignore', out, out] });
+  s.unref();
   fs.closeSync(out);
-  try { fs.writeFileSync(DAEMON_PID_FILE, String(d.pid)); } catch {}
-  console.log(`[easyclaude] sup-daemon spawned: pid=${d.pid}`);
+  console.log(`[easyclaude] supervisor spawned: pid=${s.pid}`);
 }
 
-function daemonSpawn(sid, sockPath, pidPath, cwd, args, childEnv) {
-  const conn = net.createConnection(DAEMON_SOCK);
+function connectSupervisorMgmt(retries) {
+  retries = retries !== undefined ? retries : 30;
+  const conn = net.createConnection(SUP_MGMT_SOCK);
   conn.on('connect', () => {
-    conn.write(JSON.stringify({
-      op: 'spawn', sid, sockPath, pidPath, cwd, args,
-      env: { ...childEnv, _EC_CLAUDE_BIN: CLAUDE_BIN },
-    }) + '\n');
-    conn.end();
+    supMgmtConn = conn;
+    supMgmtBuf  = '';
+    console.log('[easyclaude] supervisor mgmt connected');
   });
-  conn.on('error', err => console.error(`[easyclaude] daemon spawn error ${sid}: ${err.message}`));
+  conn.on('data', d => {
+    supMgmtBuf += String(d);
+    let nl;
+    while ((nl = supMgmtBuf.indexOf('\n')) >= 0) {
+      const line = supMgmtBuf.slice(0, nl); supMgmtBuf = supMgmtBuf.slice(nl + 1);
+      if (!line) continue;
+      let msg; try { msg = JSON.parse(line); } catch { continue; }
+      if (msg.op === 'sessions') {
+        // supervisor 연결 직후 수신 — 서버 재시작임을 의미
+        supervisorAliveSids.clear();
+        for (const s of (msg.list || [])) {
+          if (s.alive) supervisorAliveSids.add(s.sid);
+        }
+        console.log(`[easyclaude] supervisor sessions: ${msg.list?.length || 0} total, ${supervisorAliveSids.size} alive`);
+      } else if (msg.op === 'exited') {
+        // supervisor가 세션 종료를 관리 채널로 알림 (추가 처리 불필요 — 세션 소켓에서 처리됨)
+        console.log(`[easyclaude] supervisor: session exited ${msg.sid} code=${msg.code}`);
+      }
+    }
+  });
+  conn.on('error', err => {
+    supMgmtConn = null;
+    if (retries > 0 && (err.code === 'ENOENT' || err.code === 'ECONNREFUSED')) {
+      setTimeout(() => connectSupervisorMgmt(retries - 1), 100);
+    } else {
+      console.error(`[easyclaude] supervisor mgmt error: ${err.message}`);
+    }
+  });
+  conn.on('close', () => { supMgmtConn = null; });
 }
 
-function daemonDestroy(sid) {
-  const conn = net.createConnection(DAEMON_SOCK);
-  conn.on('connect', () => {
-    conn.write(JSON.stringify({ op: 'destroy', sid }) + '\n');
-    conn.end();
-  });
-  conn.on('error', () => {});
+function supervisorSend(obj) {
+  if (!supMgmtConn || supMgmtConn.destroyed) return;
+  try { supMgmtConn.write(JSON.stringify(obj) + '\n'); } catch {}
 }
 
 const cfgPath = findConfigPath();
@@ -540,10 +697,13 @@ function effectiveArgs(sess) {
 
 function serializeForClient(s) {
   const ch = ptyChannels.get(s.id);
-  let alive = !!(ch && ch.proc && ch.proc.exitCode === null);
-  if (!alive) {
-    // ptyChannels에 없어도 supervisor가 살아있으면 alive로 표시
-    const supBaseDir = path.join(XDG_DATA_HOME, 'easyclaude', 'sup');
+  let alive = false;
+  if (ch) {
+    // ch가 있으면 ch.alive 플래그 우선 — disconnect 후 false로 세팅됨
+    alive = !!(ch.alive && ch.proc && ch.proc.exitCode === null);
+  } else {
+    // ch가 없을 때만 supervisor PID 파일로 alive 보완
+    const supBaseDir = SUP_DIR;
     const safeId = s.id.replace(/[^A-Za-z0-9_.-]/g, '_');
     const pidPath = path.join(supBaseDir, `${safeId}.pid`);
     try {
@@ -654,8 +814,13 @@ function listClaudeSessions({ cwd, q, limit }) {
   return summaries;
 }
 
+// homeDir은 ec config 디렉토리(~/.easyclaude) 또는 ~/.claude 호환 경로.
+// homeDir 자체에서 credentials/oauthAccount를 찾고, 없으면 .claude 서브디렉토리도 fallback.
 function inspectClaudeHome(homeDir) {
-  const claudeDir = path.join(homeDir, '.claude');
+  let claudeDir = homeDir;
+  if (!fs.existsSync(path.join(claudeDir, '.credentials.json')) && fs.existsSync(path.join(homeDir, '.claude'))) {
+    claudeDir = path.join(homeDir, '.claude');
+  }
   if (!fs.existsSync(claudeDir)) return null;
   let readable = false, writable = false;
   try { fs.accessSync(claudeDir, fs.constants.R_OK); readable = true; } catch {}
@@ -663,56 +828,21 @@ function inspectClaudeHome(homeDir) {
   let email = null, hasCredentials = false;
   try {
     const credPath = path.join(claudeDir, '.credentials.json');
-    if (fs.existsSync(credPath)) {
-      hasCredentials = true;
-      // 파일 권한 600이라 우리(team-pm) 소유 아니면 못 읽음
-      try {
-        const cred = JSON.parse(fs.readFileSync(credPath, 'utf8'));
-        // oauth account 정보 별도 보관 위치도 검사
-      } catch {}
-    }
-    // 메일은 .claude.json 의 oauthAccount 에 보관됨 (HOME 안)
-    const claudeJson = path.join(homeDir, '.claude.json');
-    if (fs.existsSync(claudeJson)) {
+    if (fs.existsSync(credPath)) hasCredentials = true;
+    // .claude.json (oauthAccount) 후보: ec home 자체 또는 real ~/.claude.json
+    const candidates = [path.join(homeDir, '.claude.json'), path.join(homeDir, '..', '.claude.json')];
+    for (const claudeJson of candidates) {
+      if (!fs.existsSync(claudeJson)) continue;
       try {
         const cj = JSON.parse(fs.readFileSync(claudeJson, 'utf8'));
         email = cj.oauthAccount?.emailAddress || cj.oauthAccount?.email || null;
+        if (email) break;
       } catch {}
     }
   } catch {}
   let mtime = null;
   try { mtime = fs.statSync(claudeDir).mtimeMs; } catch {}
   return { home: homeDir, claudeDir, email, hasCredentials, readable, writable, mtime };
-}
-
-function scanClaudeHomes() {
-  const candidates = new Set();
-  // 1) 현재 프로세스 HOME (가장 흔한 케이스)
-  if (process.env.HOME) candidates.add(process.env.HOME);
-  // 2) /home/* 스캔 (각 디렉토리에 .claude 있는지)
-  try {
-    for (const u of fs.readdirSync('/home')) {
-      const p = path.join('/home', u);
-      try {
-        if (fs.statSync(p).isDirectory()) candidates.add(p);
-      } catch {}
-    }
-  } catch {}
-  // 3) /root
-  if (fs.existsSync('/root')) candidates.add('/root');
-
-  const out = [];
-  for (const homeDir of candidates) {
-    const info = inspectClaudeHome(homeDir);
-    if (info) out.push(info);
-  }
-  // readable + writable 우선 정렬
-  out.sort((a, b) => {
-    if (a.writable !== b.writable) return a.writable ? -1 : 1;
-    if (a.readable !== b.readable) return a.readable ? -1 : 1;
-    return (b.mtime || 0) - (a.mtime || 0);
-  });
-  return out;
 }
 
 let _cachedOptions = null;
@@ -890,13 +1020,13 @@ const server = http.createServer((req, res) => {
     // /status — 세션 메타 (model, cwd, session_id, tools, mcp_servers...)
     if (cmd === 'status') {
       if (!ch) return res.end(JSON.stringify({ok:false, error:'session not running', sid}));
-      return res.end(JSON.stringify({ok:true, session: ch.parser.snapshot().session}));
+      return res.end(JSON.stringify({ok:true, session: ch.session}));
     }
     // /usage, /context — token usage (in/out/cache) 누적
     if (cmd === 'usage' || cmd === 'context') {
       if (!ch) return res.end(JSON.stringify({ok:false, error:'session not running', sid}));
-      const snap = ch.parser.snapshot();
-      return res.end(JSON.stringify({ok:true, usage: snap.session.usage, lastResult: ch.parser.lastResult, contextWindow: snap.session.contextWindow}));
+      const snap = ({});
+      return res.end(JSON.stringify({ok:true, usage: snap.session.usage, lastResult: (ch.lastResult || null), contextWindow: snap.session.contextWindow}));
     }
     // /stats — ~/.claude/stats-cache.json
     if (cmd === 'stats') {
@@ -915,7 +1045,7 @@ const server = http.createServer((req, res) => {
       const home = sid ? homeDirOf(sid) : (process.env.HOME || '/tmp');
       const agentsDir = path.join(home, '.claude', 'agents');
       const files = listDirSafe(agentsDir).filter(f => f.endsWith('.md') || f.endsWith('.json'));
-      const sessionAgents = ch ? (ch.parser.snapshot().session.agents || []) : [];
+      const sessionAgents = ch ? (ch.session.agents || []) : [];
       return res.end(JSON.stringify({ok:true, files, sessionAgents}));
     }
     // /tasks — .claude/tasks/ 디렉토리 (project-local)
@@ -931,7 +1061,7 @@ const server = http.createServer((req, res) => {
       const auth = spawnSync('claude', ['auth', 'status', '--json'], {timeout: 5000, encoding:'utf8'}).stdout?.trim();
       let authParsed = null;
       try { authParsed = JSON.parse(auth); } catch {}
-      const sessSnap = ch ? ch.parser.snapshot().session : null;
+      const sessSnap = ch ? ch.session : null;
       return res.end(JSON.stringify({
         ok: true,
         claudeVersion: version,
@@ -985,12 +1115,10 @@ const server = http.createServer((req, res) => {
   // /api/claude-homes — DEPRECATED (multi-home 컨셉 폐기). ec는 단일 ec HOME만 다룸.
   // 호환을 위해 ec HOME 하나만 list로 감싸 반환.
   if (req.url === '/api/claude-homes' || req.url.startsWith('/api/claude-homes?')) {
-    const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
     let home;
-    try { home = overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+    try { home = ensureEcHome(process.env.HOME); }
     catch { home = process.env.HOME; }
-    const info = inspectClaudeHome(home) || { home, claudeDir: path.join(home, '.claude'), email: null, hasCredentials: false, readable: true, writable: true };
-    info.overlayEnabled = overlayEnabled;
+    const info = inspectClaudeHome(home) || { home, claudeDir: home, email: null, hasCredentials: false, readable: true, writable: true };
     res.writeHead(200, {'Content-Type':'application/json'});
     return res.end(JSON.stringify({ list: [info] }));
   }
@@ -1003,13 +1131,12 @@ const server = http.createServer((req, res) => {
     const sid = u.searchParams.get('sid') || '';
     const sess = findSession(sid);
     const ovHome = (() => {
-      const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
-      try { return overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+      try { return ensureEcHome(process.env.HOME); }
       catch { return process.env.HOME; }
     })();
     const cwd = sess?.cwd || null;
     const scopes = [
-      { scope: 'user', file: path.join(ovHome, '.claude', 'settings.json'), dir: path.join(ovHome, '.claude') },
+      { scope: 'user', file: path.join(ovHome, 'settings.json'), dir: ovHome },
     ];
     if (cwd) {
       scopes.push({ scope: 'project', file: path.join(cwd, '.claude', 'settings.json'), dir: path.join(cwd, '.claude') });
@@ -1029,7 +1156,7 @@ const server = http.createServer((req, res) => {
         const j = readJson(mcpLoc.file);
         const servers = (j && typeof j[mcpLoc.key] === 'object') ? j[mcpLoc.key] : {};
         // disabled list는 settings.json 쪽에만 있음 — scope settings.json도 보조 읽기
-        const sFile = scope === 'user' ? path.join(ovHome, '.claude', 'settings.json') :
+        const sFile = scope === 'user' ? path.join(ovHome, 'settings.json') :
                        scope === 'project' && cwd ? path.join(cwd, '.claude', 'settings.json') :
                        scope === 'local' && cwd   ? path.join(cwd, '.claude', 'settings.local.json') : null;
         const s = sFile ? readJson(sFile) : {};
@@ -1061,7 +1188,7 @@ const server = http.createServer((req, res) => {
       const skLoc = resolveScopeFile(scope, 'skill', cwd, ovHome);
       if (skLoc?.dir) {
         const skillsDir = path.join(skLoc.dir, 'skills');
-        const sFile = scope === 'user' ? path.join(ovHome, '.claude', 'settings.json') :
+        const sFile = scope === 'user' ? path.join(ovHome, 'settings.json') :
                        scope === 'project' && cwd ? path.join(cwd, '.claude', 'settings.json') :
                        scope === 'local' && cwd   ? path.join(cwd, '.claude', 'settings.local.json') : null;
         const s = sFile ? readJson(sFile) : {};
@@ -1097,8 +1224,7 @@ const server = http.createServer((req, res) => {
     const name = u.searchParams.get('name') || '';
     const sess = findSession(sid);
     const ovHome = (() => {
-      const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
-      try { return overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+      try { return ensureEcHome(process.env.HOME); }
       catch { return process.env.HOME; }
     })();
     const cwd = sess?.cwd || null;
@@ -1137,8 +1263,7 @@ const server = http.createServer((req, res) => {
       }
       const sess = findSession(sid || '');
       const ovHome = (() => {
-        const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
-        try { return overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+        try { return ensureEcHome(process.env.HOME); }
         catch { return process.env.HOME; }
       })();
       const cwd = sess?.cwd || null;
@@ -1201,8 +1326,7 @@ const server = http.createServer((req, res) => {
       }
       const sess = findSession(sid || '');
       const ovHome = (() => {
-        const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
-        try { return overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+        try { return ensureEcHome(process.env.HOME); }
         catch { return process.env.HOME; }
       })();
       const cwd = sess?.cwd || null;
@@ -1275,13 +1399,12 @@ const server = http.createServer((req, res) => {
       }
       const sess = findSession(sid || '');
       const ovHome = (() => {
-        const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
-        try { return overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+        try { return ensureEcHome(process.env.HOME); }
         catch { return process.env.HOME; }
       })();
       const cwd = sess?.cwd || null;
       let file;
-      if (scope === 'user') file = path.join(ovHome, '.claude', 'settings.json');
+      if (scope === 'user') file = path.join(ovHome, 'settings.json');
       else if (scope === 'project' && cwd) file = path.join(cwd, '.claude', 'settings.json');
       else if (scope === 'local' && cwd) file = path.join(cwd, '.claude', 'settings.local.json');
       else { res.writeHead(400, {'Content-Type':'application/json'}); return res.end(JSON.stringify({ error: 'invalid scope or missing cwd' })); }
@@ -1320,12 +1443,10 @@ const server = http.createServer((req, res) => {
 
   // /api/ec-home — ec가 현재 사용 중인 단일 HOME 정보
   if (req.url === '/api/ec-home' || req.url.startsWith('/api/ec-home?')) {
-    const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
     let home;
-    try { home = overlayEnabled ? ensureOverlayHome(process.env.HOME) : process.env.HOME; }
+    try { home = ensureEcHome(process.env.HOME); }
     catch { home = process.env.HOME; }
-    const info = inspectClaudeHome(home) || { home, claudeDir: path.join(home, '.claude'), email: null, hasCredentials: false, readable: true, writable: true };
-    info.overlayEnabled = overlayEnabled;
+    const info = inspectClaudeHome(home) || { home, claudeDir: home, email: null, hasCredentials: false, readable: true, writable: true };
     info.realHome = process.env.HOME;
     info.hasEcToken = !!getEcToken(home);
     if (info.hasEcToken) info.hasCredentials = true;
@@ -1338,7 +1459,7 @@ const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
     const home = u.searchParams.get('home') || process.env.HOME;
     const { spawnSync } = require('child_process');
-    const env = { ...process.env, HOME: home };
+    const env = { ...process.env, CLAUDE_CONFIG_DIR: home };
     // credentials.json이 없을 때만 ec native token 주입 (있으면 claude가 직접 사용)
     const ecToken = getEcToken(home);
     if (ecToken && !env.CLAUDE_CODE_OAUTH_TOKEN && !hasCredentialsJson(home)) {
@@ -1391,7 +1512,7 @@ const server = http.createServer((req, res) => {
       if (existing && existing.proc && existing.proc.exitCode === null) {
         try { existing.proc.kill('SIGTERM'); } catch {}
       }
-      const proc = spawnClaudePty(flags, { ...process.env, HOME: home });
+      const proc = spawnClaudePty(flags, { ...process.env, CLAUDE_CONFIG_DIR: home });
       const state = { proc, url: null, status: 'pending', output: '', error: '', exitCode: null };
       authProcs.set(home, state);
       proc.stdout.setEncoding('utf8');
@@ -1455,7 +1576,7 @@ const server = http.createServer((req, res) => {
       const home = (body && body.home) || process.env.HOME;
       const { spawnSync } = require('child_process');
       const r = spawnSync('claude', ['auth', 'logout'], {
-        env: { ...process.env, HOME: home },
+        env: { ...process.env, CLAUDE_CONFIG_DIR: home },
         timeout: 10000, encoding: 'utf8',
       });
       // 진행 중 login proc 있으면 정리
@@ -1476,7 +1597,7 @@ const server = http.createServer((req, res) => {
     const home = u.searchParams.get('home') || process.env.HOME;
     const { spawnSync } = require('child_process');
     const auth = spawnSync('claude', ['auth', 'status', '--json'], {
-      env: { ...process.env, HOME: home }, timeout: 5000, encoding: 'utf8',
+      env: { ...process.env, CLAUDE_CONFIG_DIR: home }, timeout: 5000, encoding: 'utf8',
     });
     let authParsed = null;
     try { authParsed = JSON.parse(auth.stdout); } catch {}
@@ -1520,7 +1641,7 @@ const server = http.createServer((req, res) => {
       if (existing && existing.proc && existing.proc.exitCode === null) {
         try { existing.proc.kill('SIGTERM'); } catch {}
       }
-      const proc = spawnClaudePty(['setup-token'], { ...process.env, HOME: home });
+      const proc = spawnClaudePty(['setup-token'], { ...process.env, CLAUDE_CONFIG_DIR: home });
       const state = { proc, url: null, status: 'pending', output: '', error: '', exitCode: null };
       authProcs.set(home, state);
       proc.stdout.setEncoding('utf8'); proc.stderr.setEncoding('utf8');
@@ -1699,11 +1820,10 @@ const server = http.createServer((req, res) => {
         clearTimeout(ch.debounceTimer);
         ch.debounceTimer = null;
         try {
-          const snap = ch.parser.snapshot();
-          // restart 직전 flush — full turns 강제 송신 (다음 EC가 reattach 후 다시 시작)
-          ch.broadcast({ op: 'turns', turns: snap.turns, usage: snap.session.usage });
-          ch.lastBroadcastLen = snap.turns.length;
-          ch.lastTailSig = '';
+          // restart 직전 flush — full events 강제 송신
+          ch.broadcast({ op: 'events', events: ch.events || [], usage: ch.session?.usage });
+          ch._evtBroadcastLen = (ch.events || []).length;
+          ch._evtTailSig = '';
         } catch {}
       }
     }
@@ -1718,6 +1838,39 @@ const server = http.createServer((req, res) => {
       fs.closeSync(out);
     }, 500);
     return;
+  }
+
+  // /api/ec-env — schema + 사용자 overrides + extraFiles GET/PUT
+  if (req.url.startsWith('/api/ec-env')) {
+    let ecHome;
+    try { ecHome = ensureEcHome(process.env.HOME); }
+    catch { ecHome = path.join(process.env.HOME, '.easyclaude'); }
+    const envJsonPath = path.join(ecHome, 'env.json');
+    if (req.method === 'GET') {
+      const schema = loadEnvSchema();
+      let user = { overrides: {}, extraFiles: [] };
+      if (fs.existsSync(envJsonPath)) {
+        try { user = { ...user, ...JSON.parse(fs.readFileSync(envJsonPath, 'utf8')) }; } catch {}
+      }
+      res.writeHead(200, {'Content-Type':'application/json'});
+      return res.end(JSON.stringify({ ok: true, schema, user, ecHome }));
+    }
+    if (req.method === 'PUT') {
+      return readJsonBody(req, (err, body) => {
+        if (err) { res.writeHead(400); return res.end(err.message); }
+        const overrides = (body && typeof body.overrides === 'object') ? body.overrides : {};
+        const extraFiles = (body && Array.isArray(body.extraFiles)) ? body.extraFiles : [];
+        const payload = { overrides, extraFiles };
+        try { fs.writeFileSync(envJsonPath, JSON.stringify(payload, null, 2)); }
+        catch (e) {
+          res.writeHead(500, {'Content-Type':'application/json'});
+          return res.end(JSON.stringify({ error: e.message }));
+        }
+        res.writeHead(200, {'Content-Type':'application/json'});
+        return res.end(JSON.stringify({ ok: true, hint: '새로 spawn하는 세션부터 적용됩니다.' }));
+      });
+    }
+    res.writeHead(405); return res.end('GET or PUT');
   }
 
   // /api/ec-config — ec 자체 설정(cfg.json) GET/PUT
@@ -1795,13 +1948,13 @@ const server = http.createServer((req, res) => {
       return res.end(JSON.stringify({ ok: true, turns: [], total: 0, start: 0, end: 0, hint: 'jsonl not found yet (new session?)' }));
     }
     try {
-      const turns = jsonlToTurns(jsonlPath);
-      const total = turns.length;
+      const events = jsonlToEvents(jsonlPath);
+      const total = events.length;
       const before = beforeRaw != null ? Math.max(0, Math.min(total, parseInt(beforeRaw, 10) || total)) : total;
       const start  = Math.max(0, before - limit);
-      const slice  = turns.slice(start, before);
+      const slice  = events.slice(start, before);
       res.writeHead(200, {'Content-Type':'application/json'});
-      return res.end(JSON.stringify({ ok: true, turns: slice, total, start, end: before, path: jsonlPath }));
+      return res.end(JSON.stringify({ ok: true, events: slice, total, start, end: before, path: jsonlPath }));
     } catch (e) {
       res.writeHead(500, {'Content-Type':'application/json'});
       return res.end(JSON.stringify({ error: e.message }));
@@ -1994,10 +2147,10 @@ const server = http.createServer((req, res) => {
     const ch = ptyChannels.get(sid);
     if (!ch) { res.writeHead(404); return res.end('session not running'); }
     res.writeHead(200, {'Content-Type':'application/json'});
-    if (kind === 'turns')   return res.end(JSON.stringify(ch.parser.snapshot().turns, null, 2));
+    if (kind === 'turns')   return res.end(JSON.stringify(ch.events, null, 2));
     if (kind === 'raw')     return res.end(JSON.stringify(ch.rawLog.slice(-200), null, 2));
-    if (kind === 'usage')   return res.end(JSON.stringify(ch.parser.snapshot().session.usage, null, 2));
-    if (kind === 'session') return res.end(JSON.stringify(ch.parser.snapshot().session, null, 2));
+    if (kind === 'usage')   return res.end(JSON.stringify(ch.session.usage, null, 2));
+    if (kind === 'session') return res.end(JSON.stringify(ch.session, null, 2));
   }
 
   const urlPath = req.url.split('?')[0];
@@ -2049,9 +2202,8 @@ function buildSpawnArgs(sess) {
     args.push('--append-system-prompt', fmtPrompt);
   }
 
-  // jsonl 검색은 실제 spawn 대상 HOME 기준 — overlay 활성 시 process HOME에 있어도 의미 없음.
-  const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
-  const targetHome = sess.home || (overlayEnabled ? path.join(XDG_DATA_HOME, 'easyclaude', 'overlay') : process.env.HOME);
+  // jsonl 검색은 실제 spawn 대상 HOME 기준 (real HOME — projects는 ~/.claude/projects/).
+  const targetHome = sess.home || process.env.HOME;
   const saved = sessionState[sess.id];
   const existingId = saved?.claudeId;
   if (existingId) {
@@ -2098,86 +2250,103 @@ function spawnSession(sess) {
     };
     ptyChannels.set(sess.id, ch);
 
-    // broadcast / scheduleTurns 클로저는 한 번만 생성 (parser 와 함께)
+    // broadcast 클로저
     ch.broadcast = (msg) => {
       for (const [wsLocal, ids] of ch.subscribers) {
         if (wsLocal.readyState !== wsLocal.OPEN) continue;
         for (const cid of ids) wsLocal.send(JSON.stringify({ ...msg, id: cid }));
       }
     };
-    // 증분 broadcast — 매 turn마다 전체 array 전송하면 긴 세션에서 메모리/네트워크 폭발
-    // (Arche 21MB jsonl 사례). lastBroadcastLen 추적, 마지막 turn은 mutation 가능성 있어
-    // 항상 tail로 포함해 재전송.
-    ch.lastBroadcastLen = 0;
-    ch.lastTailSig = '';
-    ch.scheduleTurns = () => {
+
+    // events 배열 + 증분 브로드캐스트 (turns_patch 대신 events_patch)
+    ch.events = [];
+    ch.session = { id: null, model: null, cwd: null, tools: [], mcpServers: [],
+      usage: { input: 0, output: 0, cache_creation: 0, cache_read: 0 }, lastCtxInput: 0 };
+    ch._evtBroadcastLen = 0;
+    ch._evtTailSig = '';
+
+    ch.scheduleEvents = () => {
       if (ch.debounceTimer) return;
       ch.debounceTimer = setTimeout(() => {
         ch.debounceTimer = null;
-        const snap = ch.parser.snapshot();
-        const total = snap.turns.length;
+        const total = ch.events.length;
         if (total === 0) return;
-        // tail 시작 인덱스: 마지막 broadcast된 turn 포함 (그 turn이 stream으로 수정됐을 수 있음)
-        const fromIdx = Math.max(0, ch.lastBroadcastLen - 1);
-        const tail = snap.turns.slice(fromIdx);
-        const tailSig = JSON.stringify(tail);
-        if (tailSig === ch.lastTailSig && total === ch.lastBroadcastLen) return;
-        ch.lastTailSig = tailSig;
-        ch.lastBroadcastLen = total;
-        ch.broadcast({
-          op: 'turns_patch',
-          from: fromIdx,
-          turns: tail,
-          total,
-          usage: snap.session.usage,
-        });
+        const fromIdx = Math.max(0, ch._evtBroadcastLen - 1);
+        const tail = ch.events.slice(fromIdx);
+        const sig = tail.map(e => e.lex.category).join(',');
+        if (sig === ch._evtTailSig && total === ch._evtBroadcastLen) return;
+        ch._evtTailSig = sig;
+        ch._evtBroadcastLen = total;
+        ch.broadcast({ op: 'events_patch', from: fromIdx, events: tail, total, usage: ch.session.usage });
       }, 40);
     };
-    ch.parser = new StreamParser({
-      onTurn: (turn) => {
-        ch.scheduleTurns();
-        // 마지막 턴 시각 기록 — 탭 정렬 기준
-        if (turn.type === 'human' || turn.type === 'assistant' || turn.type === 'result') {
+
+    // event-stream 핸들러 설정
+    ch.esHandlers = {
+      onEvent: (classifiedEvt) => {
+        ch.events.push(classifiedEvt);
+        ch.scheduleEvents();
+        // 새 user_text → hadResult 클리어 (클라이언트에 별도로 알림)
+        if (classifiedEvt.lex.category === 'user_text') {
+          ch.broadcast({ op: 'user_turn', sid: sess.id });
+        }
+        const cat = classifiedEvt.lex.category;
+        if (['user_text','asst_text','asst_tool_use','asst_thinking+text','asst_thinking'].includes(cat)) {
           sessionState[sess.id] = sessionState[sess.id] || {};
           sessionState[sess.id].lastTurnAt = Date.now();
           saveState(sessionState);
         }
-        // 현재 spawn의 parser가 만든 turn에서만 stalled 감지 — client-side 재감지 없음
-        // assistant 타입은 제외: 응답 본문에 "rate limit" 등 단어가 포함되면 오탐 발생
-        if (turn.type === 'result') {
-          const b = typeof turn.body === 'string' ? turn.body : '';
-          if (/not logged in|please run \/login|please log in|invalid api key|api key not found/i.test(b)) {
-            ch.broadcast({ op: 'stalled', kind: 'auth', message: b.slice(0, 400) });
-          } else if (/rate limit|usage limit reached|quota exceeded|too many requests/i.test(b)) {
-            ch.broadcast({ op: 'stalled', kind: 'rate_limit', message: b.slice(0, 400) });
-          }
+      },
+      onInit: (evt) => {
+        ch.session.id = evt.session_id || ch.session.id;
+        ch.session.model = evt.model || ch.session.model;
+        ch.session.cwd = evt.cwd || ch.session.cwd;
+        ch.session.tools = evt.tools || ch.session.tools;
+        ch.session.mcpServers = evt.mcp_servers || [];
+        ch.session.permissionMode = evt.permissionMode || null;
+        ch.broadcast({ op: 'system', session: ch.session });
+      },
+      onUsage: (u) => {
+        const s = ch.session.usage;
+        s.input  += u.input_tokens || 0;
+        s.output += u.output_tokens || 0;
+        s.cache_creation += u.cache_creation_input_tokens || 0;
+        s.cache_read     += u.cache_read_input_tokens || 0;
+        // input_tokens + cache_read = 실제 컨텍스트 사용량
+        // cache_creation은 제외 (새로 캐시 쓰는 양이라 합산하면 100% 초과)
+        const ctxUsed = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0);
+        if (ctxUsed > 0) ch.session.lastCtxInput = ctxUsed;
+        ch.broadcast({ op: 'usage', usage: s, lastCtxInput: ch.session.lastCtxInput });
+      },
+      onResult: (evt) => {
+        const b = evt.result || '';
+        const result = { subtype: evt.subtype, is_error: !!evt.is_error, result_text: b, stop_reason: evt.stop_reason };
+        ch.broadcast({ op: 'result', result, usage: ch.session.usage });
+        ch.broadcast({ op: 'status', status: '' });
+        if (/not logged in|please run \/login|invalid api key|api key not found/i.test(b)) {
+          ch.broadcast({ op: 'stalled', kind: 'auth', message: b.slice(0, 400) });
+        } else if (/rate limit|usage limit reached|quota exceeded|too many requests/i.test(b)) {
+          ch.broadcast({ op: 'stalled', kind: 'rate_limit', message: b.slice(0, 400) });
         }
       },
-      onTurnUpdate: () => ch.scheduleTurns(),
-      onSystem: (session) => ch.broadcast({ op: 'system', session }),
-      onUsage:  (usage)   => ch.broadcast({ op: 'usage', usage, lastCtxInput: ch.parser.snapshot().session.lastCtxInput }),
-      onResult: (result, usage) => {
-        ch.broadcast({ op: 'result', result, usage });
-        ch.broadcast({ op: 'status', status: '' }); // thinking 상태 초기화
-      },
-      onCompactBoundary: () => {
-        // 압축 완료 — ec-system 메시지로 알림 (잠시 후, 스트림 안정화 대기)
-        setTimeout(() => {
-          if (ch.alive) sendUserText(ch, '<ec-system>대화가 압축됐습니다.</ec-system>');
-        }, 500);
-      },
       onStatus: (status) => ch.broadcast({ op: 'status', status: status || '' }),
+      onRateLimit: (info) => {
+        console.log(`[easyclaude:rate_limit_event] ${ch.sess.id}:`, JSON.stringify(info));
+        ch.broadcast({ op: 'rate_limit', info });
+      },
+      onPartial: () => {},
+      onThinkingDelta: (text) => ch.broadcast({ op: 'thinking_delta', text }),
+      onSessionIdChange: (newId) => {
+        console.log(`[easyclaude] session_id_change: ${sess.id} ${ch.claudeId} → ${newId}`);
+        ch.claudeId = newId;
+        sessionState[sess.id] = { ...(sessionState[sess.id] || {}), claudeId: newId };
+        saveState(sessionState);
+      },
       onAskUserQuestion: ({ tool_use_id, input }) => {
         ch.pendingDialogs.set(tool_use_id, { input });
         ch.broadcast({ op: 'dialog', kind: 'AskUserQuestion', tool_use_id, input });
       },
-      onHook: (evt) => ch.broadcast({ op: 'hook', event: evt }),
-      onRateLimit: (info) => {
-        // 실제 내용 로깅 — 어떤 상황에서 rate_limit_event가 오는지 파악용
-        console.log(`[easyclaude:rate_limit_event] ${ch.sess.id}:`, JSON.stringify(info));
-        ch.broadcast({ op: 'rate_limit', info });
-      },
-    });
+    };
   }
 
   // proc spawn — spawning 플래그로 동시 진입 차단
@@ -2198,31 +2367,37 @@ function spawnSession(sess) {
     ch.claudeId = claudeId;
     console.log(`[easyclaude] spawn ${sess.id} (${claudeId}) → claude ${args.join(' ')}`);
 
+    // ec home 초기화 (~/.easyclaude/)
+    let ecHome;
+    try { ecHome = ensureEcHome(process.env.HOME); }
+    catch (e) {
+      console.error(`[easyclaude] ec home setup fail: ${e.message}`);
+      ecHome = path.join(process.env.HOME, '.easyclaude');
+    }
+
     const childEnv = {
       ...process.env,
       ...defaultClaudeEnv(),
+      ...loadEcEnv(ecHome),
       ...(injectedEnv || {}),
     };
     // ec 서버가 상속받은 claude 세션 관련 환경변수를 자식에 오염시키지 않도록 제거
-    delete childEnv.CLAUDE_CODE_SESSION_ID;
     delete childEnv.CLAUDE_CODE_ENTRYPOINT;
-    // sess.home 명시 override가 최우선. 그 외엔 ec 자체 overlay HOME 사용 (기본 ON).
-    // cfg.overlay.enabled === false 로 명시한 경우에만 real HOME 사용.
-    const overlayEnabled = !(cfg && cfg.overlay && cfg.overlay.enabled === false);
-    if (sess.home) {
-      childEnv.HOME = sess.home;
-    } else if (overlayEnabled) {
-      try {
-        const ovHome = ensureOverlayHome(process.env.HOME);
-        childEnv.HOME = ovHome;
-        console.log(`[easyclaude] overlay HOME for ${sess.id}: ${ovHome}`);
-      } catch (e) {
-        console.error(`[easyclaude] overlay setup fail: ${e.message}`);
-      }
-    }
+
+    // HOME은 real HOME 유지 (sess.home override 가능)
+    childEnv.HOME = sess.home || process.env.HOME;
+    // CLAUDE_CONFIG_DIR로 ~/.claude/ 역할을 ~/.easyclaude/로 격리
+    childEnv.CLAUDE_CONFIG_DIR = ecHome;
+    // hello 디렉토리 추가 주입 (CLAUDE.md를 모든 세션에 자동 포함)
+    childEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = path.join(__dirname, '..', 'hello');
+    // 안정적 세션 식별자 — IOA id-map 키로 사용됨 (PID 대신)
+    childEnv.CLAUDE_CODE_SESSION_ID = sess.id;
+    console.log(`[easyclaude] spawn ${sess.id}: HOME=${childEnv.HOME} CONFIG_DIR=${ecHome}`);
+
     // ec native OAuth token 자동 주입 (setup-token으로 받은 게 있고 credentials.json 없을 때만)
-    const ecToken = getEcToken(childEnv.HOME);
-    if (ecToken && !childEnv.CLAUDE_CODE_OAUTH_TOKEN && !hasCredentialsJson(childEnv.HOME)) {
+    // credentials는 ec home(CLAUDE_CONFIG_DIR)에 저장됨.
+    const ecToken = getEcToken(ecHome);
+    if (ecToken && !childEnv.CLAUDE_CODE_OAUTH_TOKEN && !hasCredentialsJson(ecHome)) {
       childEnv.CLAUDE_CODE_OAUTH_TOKEN = ecToken;
     }
 
@@ -2262,7 +2437,14 @@ function spawnSession(sess) {
 }
 
 // stdout chunk → 라인 단위 parser
+// 임시 stdio 로거 — /tmp/ec-stdio-{sid}.log에 stdin/stdout 기록
+function _tmpLog(sid, dir, text) {
+  try { fs.appendFileSync(`/tmp/ec-stdio-${sid}.log`, `[${dir}] ${text}\n`); } catch {}
+}
+
 function handleClaudeStdout(ch, data) {
+  // 임시 로거
+  if (ch.sess?.id) _tmpLog(ch.sess.id, 'OUT', data.toString().slice(0, 500));
   ch.lineBuf += data;
   let nl;
   while ((nl = ch.lineBuf.indexOf('\n')) >= 0) {
@@ -2271,7 +2453,7 @@ function handleClaudeStdout(ch, data) {
     if (line) {
       ch.rawLog.push(line);
       if (ch.rawLog.length > 200) ch.rawLog.shift();
-      ch.parser.feedLine(line);
+      processLine(line, ch.esHandlers);
       for (const p of plugins) { if (p.onStdoutLine) p.onStdoutLine(ch, line); }
     }
   }
@@ -2291,73 +2473,65 @@ function handleClaudeExit(ch, exitCode, signal) {
     ch._intentionalKill = false;
     return;
   }
-  const snap = ch.parser.snapshot();
-  ch.broadcast({ op: 'turns', turns: snap.turns, usage: snap.session.usage });
-  ch.lastBroadcastLen = snap.turns.length;
-  ch.lastTailSig = '';
+  ch.broadcast({ op: 'events', events: ch.events || [], usage: ch.session?.usage });
+  ch._evtBroadcastLen = (ch.events || []).length;
+  ch._evtTailSig = '';
   ch.broadcast({ op: 'closed', exitCode, signal, stderr: ch.stderrLog.join('').slice(-2000) });
   ch.alive = false;
+  console.log(`[alive] ${ch.sess?.id} → false (exit ${exitCode})`);
   ch.proc = null;
 }
 function handleClaudeError(ch, err) {
   console.error(`[easyclaude] spawn error ${ch.sess.id}:`, err.message);
   ch.broadcast({ op: 'closed', error: err.message });
   ch.alive = false;
+  console.log(`[alive] ${ch.sess?.id} → false (error)`);
   ch.proc = null;
 }
 
 // supervisor 부착 — 살아있는 supervisor 있으면 connect만, 없으면 detached spawn 후 connect.
 // 반환: 가상 proc 객체 (proc.stdin.write / proc.kill / proc.pid / proc.exitCode 호환)
 function attachSupervisor(sess, ch, args, childEnv) {
-  const supBaseDir = path.join(XDG_DATA_HOME, 'easyclaude', 'sup');
-  ensureDir(supBaseDir);
-  const safeId = sess.id.replace(/[^A-Za-z0-9_.-]/g, '_');
-  const sockPath = path.join(supBaseDir, `${safeId}.sock`);
-  const pidPath  = path.join(supBaseDir, `${safeId}.pid`);
-  const logPath  = path.join(supBaseDir, `${safeId}.log`);
+  ensureDir(SUP_DIR);
+  const safeId   = sess.id.replace(/[^A-Za-z0-9_.-]/g, '_');
+  const sockPath = path.join(SUP_DIR, `${safeId}.sock`);
+  const pidPath  = path.join(SUP_DIR, `${safeId}.pid`);
 
-  // 살아있는 supervisor pid 확인
-  let supAlive = false;
-  let supPid = null;
-  try {
-    const txt = fs.readFileSync(pidPath, 'utf8').trim();
-    supPid = parseInt(txt, 10);
-    if (supPid > 0) {
-      try { process.kill(supPid, 0); supAlive = true; }
-      catch (e) { console.log(`[easyclaude] sup check DEAD: ${sess.id} pid=${supPid} (${e.code})`); }
-    }
-  } catch (e) { console.log(`[easyclaude] sup pid read fail: ${sess.id} (${e.code})`); }
+  // 이 세션이 서버 재시작 전에 살아있었으면 → ec-system 주입 예약
+  const wasAlive = supervisorAliveSids.has(sess.id);
+  supervisorAliveSids.delete(sess.id); // 한 번만 사용
 
-  let reattaching = false;
-  if (supAlive) {
-    reattaching = true;
-    console.log(`[easyclaude] supervisor reattach attempt: ${sess.id} pid=${supPid} sock=${sockPath}`);
-  } else {
-    console.log(`[easyclaude] daemon spawn: ${sess.id}`);
-    daemonSpawn(sess.id, sockPath, pidPath, sess.cwd, args, childEnv);
-  }
+  // spawn 요청은 connectSocket 실패(소켓 없음) 시에만 → reattach 우선
 
-  // virtual proc 만들기
+  // virtual proc
   const virt = {
     pid: null, exitCode: null,
     _sock: null,
     stdin: { write: (data) => virt._send({ op: 'input', data }), on: () => {} },
-    kill: (sig) => virt._send({ op: 'kill', signal: sig || 'SIGTERM' }),
+    kill:  (sig) => virt._send({ op: 'kill', signal: sig || 'SIGTERM' }),
     _send(obj) {
       if (!this._sock || this._sock.destroyed) return;
       try { this._sock.write(JSON.stringify(obj) + '\n'); } catch {}
     },
   };
-  ch.proc = virt;
+  ch.proc  = virt;
   ch.alive = true;
+  console.log(`[alive] ${ch.sess?.id} → true (supervisor attached)`);
   ch.lineBuf = '';
+  // 재연결 시 events/broadcast 카운터 리셋 — 구버전 카운터로 빈 tail 계산 방지
+  ch.events = [];
+  ch._evtBroadcastLen = 0;
+  ch._evtTailSig = '';
 
-  function connectSocket(retriesLeft) {
+  function connectSocket(retriesLeft, spawnRequested = false) {
     const sock = net.createConnection(sockPath);
     let inbuf = '';
     sock.on('connect', () => {
       virt._sock = sock;
       console.log(`[easyclaude] supervisor connected: ${sess.id}`);
+      // _sock 설정 직후: 기존 watcher stop (sock=null 상태로 시작됐을 것) 후 재호출
+      if (ch.inboxStop) { try { ch.inboxStop(); } catch {} ch.inboxStop = null; ch.signedInAs = null; }
+      for (const p of plugins) { if (p.onSessionSpawn) p.onSessionSpawn(ch, sess); }
     });
     sock.on('data', d => {
       inbuf += String(d);
@@ -2365,33 +2539,27 @@ function attachSupervisor(sess, ch, args, childEnv) {
       while ((nl = inbuf.indexOf('\n')) >= 0) {
         const line = inbuf.slice(0, nl); inbuf = inbuf.slice(nl + 1);
         if (!line) continue;
-        let msg;
-        try { msg = JSON.parse(line); } catch { continue; }
+        let msg; try { msg = JSON.parse(line); } catch { continue; }
         if (msg.op === 'hello') {
           virt.pid = msg.claudePid;
-          // reattach 했는데 supervisor가 이미 claude를 잃은 좀비 상태이면
-          // 무한 respawn 루프 방지 위해 봉인된 supervisor를 죽이고 새로 spawn.
-          const claudeAlive = msg.alive !== undefined ? msg.alive : !msg.exited; // 구형 호환
-          if (!claudeAlive) {
-            // claude 죽음 (daemon이 명시적으로 alive=false 전달)
-            console.warn(`[easyclaude] supervisor zombie: ${sess.id} pid=${supPid} → daemon respawn`);
-            reattaching = false;
+          if (!msg.alive) {
+            // supervisor가 명시적으로 dead → re-spawn 요청
+            console.warn(`[easyclaude] session dead on hello: ${sess.id} → re-spawn`);
             try { sock.destroy(); } catch {}
-            if (supPid > 0) try { process.kill(supPid, 'SIGKILL'); } catch {}
-            daemonDestroy(sess.id);
+            supervisorSend({ op: 'destroy', sid: sess.id });
             setTimeout(() => {
-              daemonSpawn(sess.id, sockPath, pidPath, sess.cwd, args, childEnv);
+              supervisorSend({
+                op: 'spawn', sid: sess.id, sockPath, pidPath,
+                cwd: sess.cwd, args,
+                env: { ...childEnv, _EC_CLAUDE_BIN: CLAUDE_BIN },
+              });
               connectSocket(30);
             }, 300);
             return;
           }
-          if (reattaching) {
-            console.log(`[easyclaude] supervisor reattach OK (claude alive pid=${msg.claudePid}): ${sess.id}`);
-            ch._intentionalKill = false;
-            setTimeout(() => {
-              console.log(`[easyclaude] ec-system inject: ${sess.id}`);
-              sendUserText(ch, '<ec-system>EC 서버가 재시작됐습니다.</ec-system>');
-            }, 2000);
+          // EC 재기동 시 MCP 연결 갱신 트리거 (idle timeout=0이므로 세션은 살아있음)
+          if (wasAlive) {
+            if (ch.alive) sendUserText(ch, '<ec-system><ec-hint>이 메시지는 MCP 연결 갱신을 위한 것입니다. 답장이나 반응은 필요하지 않습니다.</ec-hint></ec-system>');
           }
         }
         else if (msg.op === 'stdout') handleClaudeStdout(ch, msg.data);
@@ -2403,20 +2571,25 @@ function attachSupervisor(sess, ch, args, childEnv) {
       }
     });
     sock.on('error', err => {
-      // supervisor가 아직 listen 시작 안 했을 수 있음 → 재시도
       if (retriesLeft > 0 && (err.code === 'ENOENT' || err.code === 'ECONNREFUSED')) {
-        setTimeout(() => connectSocket(retriesLeft - 1), 100);
+        if (!spawnRequested) {
+          // 첫 실패: 소켓 없음 → supervisor에 spawn 요청
+          console.log(`[easyclaude] no socket for ${sess.id} → requesting spawn`);
+          supervisorSend({
+            op: 'spawn', sid: sess.id, sockPath, pidPath,
+            cwd: sess.cwd, args,
+            env: { ...childEnv, _EC_CLAUDE_BIN: CLAUDE_BIN },
+          });
+        }
+        setTimeout(() => connectSocket(retriesLeft - 1, true), 100);
       } else {
         console.error(`[easyclaude] supervisor socket error ${sess.id}: ${err.message}`);
         handleClaudeError(ch, err);
       }
     });
-    sock.on('close', () => {
-      virt._sock = null;
-    });
+    sock.on('close', () => { virt._sock = null; });
   }
-  connectSocket(30);  // 최대 3초 (100ms × 30) 대기
-
+  connectSocket(30); // 소켓 연결 먼저 시도 → 실패 시 spawn
   return virt;
 }
 
@@ -2425,6 +2598,13 @@ function attachSupervisor(sess, ch, args, childEnv) {
 function notifyInputFailed(ch, kind, reason, message) {
   if (!ch || typeof ch.broadcast !== 'function') return;
   ch.broadcast({ op: 'input_failed', kind, reason, message: message || null });
+}
+
+// 모델별 컨텍스트 윈도우 크기
+function getContextWindow(model) {
+  if (!model) return 200000;
+  if (/1m/i.test(model)) return 1048576;
+  return 200000;
 }
 
 function sendUserText(ch, text) {
@@ -2436,9 +2616,29 @@ function sendUserText(ch, text) {
     notifyInputFailed(ch, 'user_text', 'no_process');
     return false;
   }
+
+  // 에이전트용 컨텍스트 힌트 — 매 턴 자동 주입 (유저에게는 ec-hint로 숨겨짐)
+  // ec-system 메시지와 슬래시 커맨드에는 주입 안 함
+  // (슬래시 커맨드는 첫 줄이 /cmd여야 claude가 로컬 커맨드로 인식)
+  let augmented = text;
+  if (!text.startsWith('<ec-system>') && !text.startsWith('/')) {
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    // KST = UTC+9
+    const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+    const timeStr = `${kst.getUTCFullYear()}. ${pad(kst.getUTCMonth()+1)}. ${pad(kst.getUTCDate())}. ${pad(kst.getUTCHours())}:${pad(kst.getUTCMinutes())}:${pad(kst.getUTCSeconds())}`;
+    const usage = ch.session?.usage || {};
+    const total = (usage.input||0) + (usage.output||0) + (usage.cache_read||0) + (usage.cache_creation||0);
+    const ctxUsed = ch.session?.lastCtxInput || 0;
+    const ctxMax  = getContextWindow(ch.session?.model || '');
+    const ctxPct  = ctxMax > 0 ? Math.round(ctxUsed / ctxMax * 100) : 0;
+    const hint = `<ec-hint>현재 시각: ${timeStr} | 누적 토큰: ${total.toLocaleString()} | 컨텍스트: ${ctxUsed.toLocaleString()}/${ctxMax.toLocaleString()} (${ctxPct}%)</ec-hint>`;
+    augmented = hint + '\n' + text;
+  }
+
   const line = JSON.stringify({
     type: 'user',
-    message: { role: 'user', content: [{ type: 'text', text }] },
+    message: { role: 'user', content: [{ type: 'text', text: augmented }] },
   }) + '\n';
   try { ch.proc.stdin.write(line); return true; }
   catch (e) {
@@ -2500,10 +2700,12 @@ wss.on('connection', ws => {
   ws.on('pong', () => { ws.isAlive = true; });
   const wsChannels = new Map(); // clientId → { sessionId }
   const send = obj => ws.readyState === ws.OPEN && ws.send(JSON.stringify(obj));
+  try { require('fs').appendFileSync(`${HOME}/tmp/ws-events.log`, `[WS:connection] ts=${Date.now()}\n`); } catch {}
 
   ws.on('message', raw => {
     let msg; try { msg = JSON.parse(raw); } catch { return; }
     const { op, id } = msg;
+    try { require('fs').appendFileSync(`${HOME}/tmp/ws-events.log`, `[WS:msg] op=${op} id=${id} ts=${Date.now()}\n`); } catch {}
 
     if (op === 'list') {
       send({ op: 'sessions', list: sessions().map(serializeForClient) });
@@ -2665,10 +2867,9 @@ wss.on('connection', ws => {
         op: 'opened', id,
         info: { pid: ch.proc.pid, sessionId: sess.id, label: sess.label, claudeId: ch.claudeId, ...sess.meta },
       });
-      // 즉시 현재 turns + 보류 다이얼로그 송신 (catch-up)
-      const snap = ch.parser.snapshot();
-      send({ op: 'turns', id, turns: snap.turns, usage: snap.session.usage });
-      if (snap.session.id) send({ op: 'system', id, session: snap.session });
+      // 즉시 현재 events + 보류 다이얼로그 송신 (catch-up)
+      send({ op: 'events', id, events: ch.events || [], usage: ch.session?.usage });
+      if (ch.session?.id) send({ op: 'system', id, session: ch.session });
       for (const [tool_use_id, pending] of ch.pendingDialogs) {
         send({ op: 'dialog', id, kind: 'AskUserQuestion', tool_use_id, input: pending.input });
       }
@@ -2680,9 +2881,10 @@ wss.on('connection', ws => {
       if (!att) return;
       const ch = ptyChannels.get(att.sessionId);
       if (!ch) return;
-      let text = msg.data;
+      const text = msg.data;
       if (!text || !text.trim()) return;
-      text = maybeBashShortcut(text);
+      // maybeBashShortcut 제거 — stream-json 모드에서 LLM이 직접 "! cmd" 인식해 Bash tool 실행.
+      // 백틱 변환은 마크다운 포맷에서 오히려 방해됨.
       sendUserText(ch, text);
       return;
     }
@@ -2695,7 +2897,7 @@ wss.on('connection', ws => {
       const sess = sessions().find(s => s.id === att.sessionId);
       if (!sess) return send({ op: 'error', id, message: 'session not found' });
       const PERM_ORDER = ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan'];
-      const snap = ch ? ch.parser.snapshot() : null;
+      const snap = ch ? ({}) : null;
       const cur = snap?.session?.permissionMode || 'default';
       const next = PERM_ORDER[(PERM_ORDER.indexOf(cur) + 1) % PERM_ORDER.length];
       const newArgs = patchArgs(sess.args || [], { permissionMode: next });
@@ -2825,6 +3027,22 @@ wss.on('connection', ws => {
       return;
     }
 
+    if (op === 'disconnect') {
+      // supervisor에서 detach + claude kill
+      const att = wsChannels.get(id);
+      if (!att) return;
+      const ch = ptyChannels.get(att.sessionId);
+      if (ch) {
+        ch._intentionalKill = true;
+        ch.alive = false;
+      }
+      supervisorSend({ op: 'destroy', sid: att.sessionId });
+      // 모든 구독자에게 closed 브로드캐스트
+      if (ch) ch.broadcast({ op: 'closed', exitCode: null, stderr: '사용자가 연결을 끊었습니다.' });
+      broadcastSessions();
+      return;
+    }
+
     if (op === 'tab_pref') {
       const { sessionId, patch } = msg;
       if (sessionId && patch) {
@@ -2914,9 +3132,12 @@ process.on('SIGINT',  shutdown);
 server.listen(PORT, HOST, () => {
   console.log(`[easyclaude] ${HOST}:${PORT}`);
   console.log(`[easyclaude] sessions: ${sessions().map(s => s.id).join(', ') || '(none)'}`);
-  // supervisor daemon 시작 (없으면 spawn)
+  // supervisor 시작 (없으면 spawn) + 관리 소켓 연결
   const supervisorEnabled = !(cfg && cfg.supervisor && cfg.supervisor.enabled === false);
-  if (supervisorEnabled) ensureDaemon();
+  if (supervisorEnabled) {
+    ensureSupervisor();
+    setTimeout(() => connectSupervisorMgmt(30), 200); // supervisor 소켓 준비 대기
+  }
   // 플러그인 로드 (서버 ready 후)
   loadPlugins({ sessionState, saveState, ptyChannels, sendUserText });
 });

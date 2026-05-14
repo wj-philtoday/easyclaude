@@ -1,107 +1,192 @@
 'use strict';
-// easyclaude supervisor — 각 세션마다 별도 process로 spawn되어 claude를 직접 자식으로 유지.
-// stdin/stdout/stderr 를 unix socket 로 expose. ec server 가 재기동돼도 supervisor 와 claude 는
-// 살아있다. 새 ec server 가 같은 socket 에 reconnect 하면 최근 N 라인 buffer 가 catch-up 으로 흘러나옴.
+// easyclaude supervisor — 단일 프로세스로 모든 claude 세션 관리.
+// EC server의 관리 소켓 요청을 받아 세션 생사를 처리하고,
+// 각 세션 I/O를 per-session unix socket으로 노출.
 //
-// 호출 방식 (ec server 에서):
-//   nohup setsid node /opt/easyclaude/server/supervisor.js \
-//     <sid> <sockPath> <pidPath> <cwd> '<argsJson>' '<envJson>' \
-//     > <logPath> 2>&1 < /dev/null &
+// 실행: nohup setsid node supervisor.js <mgmt-sock> <pid-file> >> <log> 2>&1 &
 //
-// 프로토콜 (newline-delimited JSON):
-//   server→supervisor:
-//     {"op":"input","data":"...line...\\n"}   stdin 으로 그대로 forward
-//     {"op":"kill","signal":"SIGTERM"}        claude 에 시그널
-//     {"op":"shutdown"}                       supervisor 자체 종료
-//   supervisor→server:
-//     {"op":"stdout","data":"..."}            claude stdout chunk
-//     {"op":"stderr","data":"..."}            claude stderr chunk
-//     {"op":"exit","code":N,"signal":null}    claude 종료
-//     {"op":"hello","claudePid":N,"bufferedChunks":K}
-'use strict';
+// 서버 → 수퍼바이저 (관리 소켓):
+//   {"op":"spawn","sid":"...","sockPath":"...","pidPath":"...","cwd":"...","args":[...],"env":{}}
+//   {"op":"kill","sid":"...","signal":"SIGTERM"}
+//   {"op":"destroy","sid":"..."}
+//   {"op":"list"}
+//
+// 수퍼바이저 → 서버 (관리 소켓):
+//   {"op":"sessions","list":[...]}  ← 연결 즉시 전송 (서버가 ec-system 주입 여부 판단)
+//   {"op":"spawned","sid":"...","pid":N}
+//   {"op":"exited","sid":"...","code":N,"signal":null}
+//
+// 세션 소켓 프로토콜:
+//   수퍼→서버: hello(alive, bufferedChunks), stdout, stderr, exit
+//   서버→수퍼: input, kill, shutdown
 
 const { spawn } = require('child_process');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
 
-const SID   = process.argv[2];
-const SOCK  = process.argv[3];
-const PIDF  = process.argv[4];
-const CWD   = process.argv[5];
-let ARGS = [];
-let ENV  = {};
-try { ARGS = JSON.parse(process.argv[6] || '[]'); } catch {}
-try { ENV  = JSON.parse(process.argv[7] || '{}'); } catch {}
+const MGMT_SOCK = process.argv[2];
+const PID_FILE  = process.argv[3];
+if (!MGMT_SOCK) { console.error('usage: supervisor.js <mgmt-sock> [pid-file]'); process.exit(2); }
 
-if (!SID || !SOCK) { console.error('usage: supervisor.js <sid> <sock> <pid> <cwd> <argsJson> <envJson>'); process.exit(2); }
+const sessions  = new Map(); // sid → session object
+const mgmtConns = new Set(); // 활성 관리 연결
 
-const childEnv = { ...process.env, ...ENV };
-// EC가 삭제한 claude 세션 관련 env vars가 process.env에서 다시 유입되지 않도록 제거
-delete childEnv.CLAUDE_CODE_SESSION_ID;
-delete childEnv.CLAUDE_CODE_ENTRYPOINT;
+// ── 세션 생성/제거 ────────────────────────────────────────────────────────────
+const SUP_LOG = process.env.HOME ? process.env.HOME + '/tmp/supervisor-events.log' : '/tmp/supervisor-events.log';
+function supLog(msg) { try { require('fs').appendFileSync(SUP_LOG, `${msg} ts=${Date.now()}\n`); } catch {} }
 
-// pid 파일 기록
-try { fs.mkdirSync(path.dirname(PIDF), { recursive: true }); } catch {}
-try { fs.writeFileSync(PIDF, String(process.pid)); } catch {}
-
-const proc = spawn('claude', ARGS, { cwd: CWD, env: childEnv, stdio: ['pipe','pipe','pipe'] });
-proc.stdout.setEncoding('utf8');
-proc.stderr.setEncoding('utf8');
-
-const conns = new Set();
-const buffer = [];                  // catch-up용 최근 chunk
-const MAX_BUFFER = 2000;
-let exited = false;
-let exitInfo = null;
-
-function broadcast(obj) {
-  const line = JSON.stringify(obj) + '\n';
-  for (const c of conns) {
-    try { c.write(line); } catch {}
+function createSession(sid, sockPath, pidPath, cwd, args, env) {
+  supLog(`[createSession] sid=${sid}`);
+  // 동일 UUID로 이미 살아있는 프로세스가 있으면 중복 소환 방지
+  const existing = sessions.get(sid);
+  if (existing) {
+    if (existing.proc.exitCode === null) {
+      supLog(`[createSession:skip] sid=${sid} already alive`);
+      console.log(`[supervisor:${sid}] already alive pid=${existing.proc.pid} — skip`);
+      return existing.proc.pid;
+    }
+    // 종료된 세션 정리 후 재생성
+    _cleanupSession(sid, false);
   }
+
+  const childEnv = { ...env };
+  const claudeBin = childEnv._EC_CLAUDE_BIN || 'claude';
+  delete childEnv._EC_CLAUDE_BIN;
+  delete childEnv.CLAUDE_CODE_SESSION_ID;
+  delete childEnv.CLAUDE_CODE_ENTRYPOINT;
+
+  const proc = spawn(claudeBin, args, { cwd, env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+  proc.stdout.setEncoding('utf8');
+  proc.stderr.setEncoding('utf8');
+  proc.stdin.on('error', () => {});
+
+  // pid 기록
+  try { fs.mkdirSync(path.dirname(pidPath), { recursive: true }); } catch {}
+  try { fs.writeFileSync(pidPath, String(proc.pid)); } catch {}
+
+  const buffer  = [];
+  const MAX_BUF = 2000;
+  const conns   = new Set();
+
+  function broadcastSession(obj) {
+    const line = JSON.stringify(obj) + '\n';
+    for (const c of conns) try { c.write(line); } catch {}
+  }
+  function broadcastMgmt(obj) {
+    const line = JSON.stringify(obj) + '\n';
+    for (const c of mgmtConns) try { c.write(line); } catch {}
+  }
+
+  proc.stdout.on('data', d => {
+    buffer.push({ op: 'stdout', data: d });
+    while (buffer.length > MAX_BUF) buffer.shift();
+    broadcastSession({ op: 'stdout', data: d });
+  });
+  proc.stderr.on('data', d => {
+    buffer.push({ op: 'stderr', data: d });
+    while (buffer.length > MAX_BUF) buffer.shift();
+    broadcastSession({ op: 'stderr', data: d });
+    const s = String(d).trim();
+    if (s) console.error(`[supervisor:${sid}:stderr] ${s.slice(0, 400)}`);
+  });
+  proc.on('exit', (code, signal) => {
+    console.log(`[supervisor:${sid}] exited code=${code} signal=${signal} pid=${proc.pid}`);
+    broadcastSession({ op: 'exit', code, signal });
+    broadcastMgmt({ op: 'exited', sid, code, signal });
+  });
+  proc.on('error', err => {
+    console.error(`[supervisor:${sid}] spawn error: ${err.message}`);
+    broadcastSession({ op: 'exit', code: -1, signal: null, error: err.message });
+    broadcastMgmt({ op: 'exited', sid, code: -1, signal: null, error: err.message });
+  });
+
+  // 세션 I/O 소켓 서버
+  try { fs.unlinkSync(sockPath); } catch {}
+  fs.mkdirSync(path.dirname(sockPath), { recursive: true });
+  const server = net.createServer(conn => {
+    conns.add(conn);
+    // proc.exitCode === null → 명시적 alive 확인 (null state 혼동 방지)
+    const alive = proc.exitCode === null;
+    supLog(`[session-socket:conn] sid=${sid} alive=${alive}`);
+    try {
+      conn.write(JSON.stringify({
+        op: 'hello', sid,
+        claudePid: proc.pid,
+        bufferedChunks: buffer.length,
+        alive,
+        exitInfo: alive ? null : { code: proc.exitCode },
+      }) + '\n');
+      for (const e of buffer) conn.write(JSON.stringify(e) + '\n');
+    } catch {}
+
+    let inbuf = '';
+    conn.on('data', d => {
+      inbuf += String(d);
+      let nl;
+      while ((nl = inbuf.indexOf('\n')) >= 0) {
+        const line = inbuf.slice(0, nl); inbuf = inbuf.slice(nl + 1);
+        if (!line) continue;
+        let msg; try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.op === 'input' && typeof msg.data === 'string') {
+          // 진단용 stdin 로그 (짧은 입력만)
+          const hex = Buffer.from(msg.data).toString('hex');
+          if (hex.length <= 64) console.log(`[supervisor:${sid}:stdin] hex=${hex} str=${JSON.stringify(msg.data)}`);
+          try { proc.stdin.write(msg.data); } catch {}
+        } else if (msg.op === 'kill') {
+          try { proc.kill(msg.signal || 'SIGTERM'); } catch {}
+        } else if (msg.op === 'shutdown') {
+          // 명시적 세션 종료 요청
+          try { proc.kill('SIGTERM'); } catch {}
+          setTimeout(() => destroySession(sid), 300);
+        }
+      }
+    });
+    conn.on('error', () => {});
+    conn.on('close', () => conns.delete(conn));
+  });
+  server.listen(sockPath, () => {
+    try { fs.chmodSync(sockPath, 0o600); } catch {}
+    console.log(`[supervisor:${sid}] pid=${process.pid} claude=${proc.pid} sock=${sockPath}`);
+  });
+  server.on('error', err => console.error(`[supervisor:${sid}] socket error: ${err.message}`));
+
+  sessions.set(sid, { proc, server, sockPath, pidPath });
+  return proc.pid;
 }
 
-function rememberOutput(op, data) {
-  buffer.push({ op, data });
-  while (buffer.length > MAX_BUFFER) buffer.shift();
+function _cleanupSession(sid, unlinkFiles) {
+  const s = sessions.get(sid);
+  if (!s) return;
+  try { s.proc.kill('SIGKILL'); } catch {}
+  if (s.server) try { s.server.close(); } catch {}
+  if (unlinkFiles) {
+    try { fs.unlinkSync(s.sockPath); } catch {}
+    try { fs.unlinkSync(s.pidPath); } catch {}
+  }
+  sessions.delete(sid);
 }
 
-proc.stdout.on('data', d => { rememberOutput('stdout', d); broadcast({ op: 'stdout', data: d }); });
-proc.stderr.on('data', d => { rememberOutput('stderr', d); broadcast({ op: 'stderr', data: d }); });
-proc.stdin.on('error', () => {});
+function destroySession(sid) {
+  _cleanupSession(sid, true);
+  console.log(`[supervisor] destroyed: ${sid}`);
+}
 
-proc.on('exit', (code, signal) => {
-  exited = true;
-  exitInfo = { code, signal };
-  broadcast({ op: 'exit', code, signal });
-  // supervisor는 계속 살아있음 — EC 재시작 후 reattach + claude 재스폰을 기다림
-  // (종료 + pid 삭제하지 않음. EC가 reattach 후 새 claude를 스폰함)
-});
-proc.on('error', err => {
-  console.error('[supervisor]', SID, 'spawn error:', err.message);
-  broadcast({ op: 'exit', code: -1, signal: null, error: err.message });
-});
+// ── 관리 소켓 ─────────────────────────────────────────────────────────────────
+try { fs.unlinkSync(MGMT_SOCK); } catch {}
+fs.mkdirSync(path.dirname(MGMT_SOCK), { recursive: true });
 
-try { fs.unlinkSync(SOCK); } catch {}
-fs.mkdirSync(path.dirname(SOCK), { recursive: true });
-const server = net.createServer(conn => {
-  conns.add(conn);
-  // hello + catch-up
-  // 주의: claude가 이미 exit한 경우, exit op는 catch-up으로 replay하지 않음.
-  // 대신 hello에 exited 플래그를 포함해 EC가 명시적으로 처리하게 한다
-  // (replay하면 EC가 채널을 dormant 처리 → ec-system inject로 sendUserText →
-  // 자동 respawn → 새 EC 연결 → 또 exit replay → 무한 루프 발생함).
-  try {
-    conn.write(JSON.stringify({
-      op: 'hello', sid: SID,
-      claudePid: proc.pid,
-      bufferedChunks: buffer.length,
-      exited,
-      exitInfo: exited ? exitInfo : null,
-    }) + '\n');
-    for (const e of buffer) conn.write(JSON.stringify(e) + '\n');
-  } catch {}
+const mgmtServer = net.createServer(conn => {
+  mgmtConns.add(conn);
+  // 연결 즉시 세션 목록 전송 — 서버가 재시작 후 ec-system 주입 여부 결정
+  const list = [...sessions.entries()].map(([sid, s]) => ({
+    sid,
+    pid: s.proc.pid,
+    alive: s.proc.exitCode === null,
+    sockPath: s.sockPath,
+  }));
+  try { conn.write(JSON.stringify({ op: 'sessions', list }) + '\n'); } catch {}
+
   let inbuf = '';
   conn.on('data', d => {
     inbuf += String(d);
@@ -109,36 +194,50 @@ const server = net.createServer(conn => {
     while ((nl = inbuf.indexOf('\n')) >= 0) {
       const line = inbuf.slice(0, nl); inbuf = inbuf.slice(nl + 1);
       if (!line) continue;
-      let msg;
-      try { msg = JSON.parse(line); } catch { continue; }
-      if (msg.op === 'input' && typeof msg.data === 'string') {
-        // 임시 stdin 로그 — hex dump로 실제 전송 데이터 확인용
-        const hex = Buffer.from(msg.data).toString('hex');
-        if (hex.length <= 64) {  // 짧은 입력만 (escape sequence 확인용)
-          console.log(`[supervisor:${SID}:stdin] hex=${hex} str=${JSON.stringify(msg.data)}`);
-        }
-        try { proc.stdin.write(msg.data); } catch {}
+      let msg; try { msg = JSON.parse(line); } catch { continue; }
+      if (msg.op === 'spawn') {
+        const pid = createSession(msg.sid, msg.sockPath, msg.pidPath, msg.cwd, msg.args, msg.env || {});
+        try { conn.write(JSON.stringify({ op: 'spawned', sid: msg.sid, pid }) + '\n'); } catch {}
       } else if (msg.op === 'kill') {
-        try { proc.kill(msg.signal || 'SIGTERM'); } catch {}
-      } else if (msg.op === 'shutdown') {
-        try { proc.kill('SIGTERM'); } catch {}
+        const s = sessions.get(msg.sid);
+        if (s) try { s.proc.kill(msg.signal || 'SIGTERM'); } catch {}
+      } else if (msg.op === 'destroy') {
+        destroySession(msg.sid);
+        try { conn.write(JSON.stringify({ op: 'destroyed', sid: msg.sid }) + '\n'); } catch {}
+      } else if (msg.op === 'list') {
+        const list = [...sessions.entries()].map(([sid, s]) => ({
+          sid, pid: s.proc.pid, alive: s.proc.exitCode === null,
+        }));
+        try { conn.write(JSON.stringify({ op: 'sessions', list }) + '\n'); } catch {}
       }
     }
   });
   conn.on('error', () => {});
-  conn.on('close', () => conns.delete(conn));
-});
-server.listen(SOCK, () => {
-  try { fs.chmodSync(SOCK, 0o600); } catch {}
-  console.log(`[supervisor:${SID}] pid=${process.pid} claude=${proc.pid} sock=${SOCK}`);
-});
-server.on('error', err => {
-  console.error('[supervisor]', SID, 'server error:', err.message);
+  conn.on('close', () => mgmtConns.delete(conn));
 });
 
-// 자체 종료 시그널 처리 — claude 도 함께 정리
-function shutdown(sig) {
-  try { proc.kill(sig || 'SIGTERM'); } catch {}
+mgmtServer.listen(MGMT_SOCK, () => {
+  try { fs.chmodSync(MGMT_SOCK, 0o600); } catch {}
+  console.log(`[supervisor] started pid=${process.pid} mgmt=${MGMT_SOCK}`);
+});
+mgmtServer.on('error', err => {
+  console.error('[supervisor] mgmt error:', err.message);
+  process.exit(1);
+});
+
+// supervisor 자신의 pid 기록
+if (PID_FILE) {
+  try { fs.mkdirSync(path.dirname(PID_FILE), { recursive: true }); } catch {}
+  try { fs.writeFileSync(PID_FILE, String(process.pid)); } catch {}
 }
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT',  () => shutdown('SIGINT'));
+
+// 종료 처리 — server restart 시 SIGTERM 받지 않음, 전체 종료 시에만
+process.on('SIGTERM', () => {
+  console.log('[supervisor] SIGTERM — cleanup all sessions');
+  for (const [sid] of [...sessions]) destroySession(sid);
+  setTimeout(() => process.exit(0), 500);
+});
+process.on('SIGINT', () => {
+  for (const [sid] of [...sessions]) destroySession(sid);
+  setTimeout(() => process.exit(0), 300);
+});

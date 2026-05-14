@@ -492,12 +492,12 @@ input[type=checkbox], input[type=radio] {
 
 /* 비-발화 turn 접기 그룹 */
 .ec-turn-fold {
-  background: var(--surface-2);
-  border: 1px dashed var(--border);
-  border-radius: var(--r-sm);
-  padding: 4px 8px;
+  padding: 2px 0;
   margin: 2px 0;
+  max-width: 52%;
+  min-width: min(640px, 100%);
 }
+.ec-turn-fold[open] { background: transparent; }
 .ec-turn-fold > summary {
   list-style: none;
   cursor: pointer;
@@ -512,12 +512,23 @@ input[type=checkbox], input[type=radio] {
   content: "";
 }
 .ec-turn-fold > summary { transition: color 0.1s; }
-.ec-turn-fold[open] { background: transparent; border-style: solid; }
+.ec-turn-fold[open] { background: transparent; }
 .ec-turn-fold > .ec-turn { margin-top: 4px; }
 /* details 안 turn들도 레이아웃 동일 적용 (human 우측, assistant 좌측) */
 .ec-turn-fold .ec-turn.ec-turn-human { align-items: flex-end; }
 .ec-turn-fold .ec-turn.ec-turn-human .ec-turn-body { max-width: 75%; }
 .ec-turn-fold .ec-turn.ec-turn-assistant { align-items: flex-start; }
+/* 서브 툴 fold (복수 tool_use 그룹 내부) */
+.ec-tool-sub-fold { margin: 4px 0; }
+.ec-tool-sub-summary {
+  list-style: none; cursor: pointer;
+  font-size: 11px; color: var(--text-2);
+  padding: 2px 4px; user-select: none;
+}
+.ec-tool-sub-summary::-webkit-details-marker { display: none; }
+.ec-tool-sub-fold[open] .ec-tool-sub-summary { color: var(--text); }
+/* pre 클릭 가능 시각 힌트 */
+.ec-fold-clickable { cursor: pointer; }
 /* 접기 버튼 */
 .ec-fold-close-btn {
   text-align: center;
@@ -945,6 +956,96 @@ input[type=checkbox], input[type=radio] {
   font-size: 11px;
   color: var(--muted);
 }
+
+/* EC env-vars 편집 패널 */
+.ec-env-list {
+  display: flex; flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.ec-env-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+}
+.ec-env-row-head {
+  display: flex; align-items: center; gap: 8px;
+}
+.ec-env-row-key {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 500;
+  flex: 1;
+  word-break: break-all;
+}
+.ec-env-row-type {
+  font-size: 10px;
+  color: var(--muted);
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+}
+.ec-env-row input {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.ec-env-row input::placeholder {
+  color: var(--muted);
+  opacity: 0.7;
+}
+.ec-env-row input:focus {
+  outline: none;
+  border-color: var(--accent-3);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-3) 18%, transparent);
+}
+.ec-env-row-desc {
+  font-size: 11px;
+  color: var(--text-2);
+  line-height: 1.4;
+}
+.ec-env-extra {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.ec-env-extra-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px;
+}
+.ec-env-extra-head > span {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-2);
+  font-weight: 500;
+}
+.ec-env-extra-row {
+  display: flex; gap: 6px; align-items: center;
+  margin-bottom: 4px;
+}
+.ec-env-extra-row input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.ec-env-extra-row button {
+  padding: 4px 10px;
+  font-size: 12px;
+}
 .ec-newsession-preset {
   margin-top: 10px;
   padding: 10px 12px;
@@ -1320,6 +1421,122 @@ input[type=checkbox], input[type=radio] {
 .ec-thinking-status {
   font-style: normal; font-size: 11px;
   color: var(--muted); margin-left: 6px;
+}
+
+/* ── 전폭 디바이더 ──────────────────────────────── */
+.ec-divider {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--muted); font-size: 11px;
+  padding: 2px 0; margin: 2px 0;
+}
+.ec-divider::before, .ec-divider::after {
+  content: ''; flex: 1;
+  border-top: 1px solid var(--border);
+}
+.ec-divider-warn { color: var(--orange, #f59e0b); }
+.ec-divider-warn::before, .ec-divider-warn::after {
+  border-color: var(--orange, #f59e0b);
+}
+.ec-compact-spinner {
+  display: inline-block; width: 8px; height: 8px;
+  border: 1.5px solid var(--muted); border-top-color: transparent;
+  border-radius: 50%; animation: ec-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes ec-spin { to { transform: rotate(360deg); } }
+.ec-compact-details { margin-top: 4px; text-align: left; }
+.ec-compact-details summary {
+  cursor: pointer; font-size: 11px; color: var(--muted); user-select: none;
+}
+.ec-compact-details pre {
+  margin-top: 4px; padding: 8px; background: var(--surface-2);
+  border-radius: 4px; font-size: 11px; white-space: pre-wrap;
+  word-break: break-word; text-align: left; color: var(--text);
+}
+
+/* ── 커맨드 pill ─────────────────────────────────── */
+.ec-cmd-pill {
+  display: block; text-align: right;
+  font-family: var(--font-mono, monospace); font-size: 11px;
+  padding: 2px 8px; margin: 2px 0;
+  opacity: 1; transition: opacity 0.2s;
+}
+.ec-cmd-pill.ec-pending { opacity: 0.4; }
+.ec-cmd-pill-slash { color: var(--accent, var(--green)); }
+.ec-cmd-pill-bash  { color: var(--blue, #60a5fa); }
+
+/* ── 일반 pending 말풍선 투명화 ─────────────────── */
+.ec-pending { opacity: 0.45; transition: opacity 0.2s; }
+
+/* ── 코드블록 (tool input / output / thinking) ─── */
+.ec-code-input, .ec-code-output, .ec-code-thinking {
+  font-family: var(--font-mono, 'Menlo', monospace);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 3px 0;
+  padding: 6px 8px;
+  border-radius: 0;
+  display: block;
+}
+.ec-code-input   { background: #1e1e1e; color: #d4d4d4; border-radius: 0; }
+.ec-code-output  { background: #0d1f0d; color: #89d185; border-radius: 0; }
+.ec-code-thinking{ background: #0d0d1f; color: #9da0d8; max-height: 240px; overflow-y: auto; overflow-anchor: none; }
+
+/* ── 툴유즈 탭 패널 ─────────────────────────────────── */
+.ec-tool-panel {
+  display: flex; flex-direction: row;
+  overflow: hidden;
+}
+.ec-tool-content { flex: 1; min-width: 0; }
+.ec-tool-pane { display: none; max-height: 180px; overflow-y: auto; margin: 0; border-radius: 0; overflow-anchor: none; }
+.ec-tool-pane.active { display: block; }
+.ec-tool-tabs {
+  display: flex; flex-direction: column;
+  flex-shrink: 0; width: 30px;
+}
+/* 탭 버튼: 연결된 패널과 동일한 색 → "같은 종이" 효과 */
+.ec-tool-tab {
+  background: none; border: none; cursor: pointer;
+  font-size: 9px; font-weight: 700; padding: 6px 4px;
+  writing-mode: vertical-rl; text-orientation: mixed;
+  flex: 1; border-radius: 0;
+}
+/* 입력 탭: 입력 박스 색 */
+.ec-tool-tab[data-pane="input"] { background: #1e1e1e; color: #d4d4d4; }
+/* 출력 탭: 출력 박스 색 */
+.ec-tool-tab[data-pane="output"] { background: #0d1f0d; color: #89d185; }
+.ec-tool-sub-label { font-size: 10px; color: var(--text-2); padding: 4px 0 2px; }
+@media (max-width: 880px) {
+  .ec-tool-panel { flex-direction: column; }
+  .ec-tool-tabs { flex-direction: row; width: auto; }
+  .ec-tool-tab { writing-mode: horizontal-tb; flex: 1; padding: 5px 4px; font-size: 10px; }
+}
+
+/* ── 생각 fold ───────────────────────────────────── */
+.ec-thinking-fold { margin: 2px 0; }
+.ec-thinking-summary {
+  font-size: 11px; color: var(--muted);
+  cursor: pointer; user-select: none;
+  padding: 2px 0;
+}
+.ec-thinking-fold[open] .ec-code-thinking { /* 열릴 때 내용에만 배경 */ }
+
+/* ── bash 그룹 ───────────────────────────────────── */
+.ec-bash-group { margin: 2px 0; }
+.ec-bash-details { margin-top: 2px; }
+.ec-bash-details summary {
+  cursor: pointer; font-size: 11px; color: var(--muted);
+  user-select: none; list-style: none; text-align: right;
+  padding-right: 4px;
+}
+.ec-bash-details summary::-webkit-details-marker { display: none; }
+.ec-bash-output {
+  margin: 4px 0 0; padding: 8px 10px;
+  background: var(--surface-2); border-radius: 4px;
+  font-size: 12px; white-space: pre-wrap; word-break: break-word;
+  color: var(--text); text-align: left;
+  max-height: 300px; overflow-y: auto;
 }
 @keyframes ec-thinking {
   0%, 60%, 100% { opacity: 0.2; transform: scale(0.8); }

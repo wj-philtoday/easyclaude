@@ -1,4 +1,5 @@
 'use strict';
+const { classify } = require('./lexicon');
 // Claude Code stream-json 출력 파서.
 // 라인별 JSON 이벤트(system/user/assistant/result/stream_event/hook_event)를
 // 클라이언트가 렌더할 수 있는 통일된 turn 형태로 변환한다.
@@ -61,12 +62,16 @@ class StreamParser {
       cwd: null,
       tools: [],
       usage: { input: 0, output: 0, cache_creation: 0, cache_read: 0 },
-      lastCtxInput: 0,   // 마지막 turn의 input_tokens (ctx% 계산용)
+      lastCtxInput: 0,
       contextWindow: null,
     };
     this.lastResult = null;
     this.pendingAssistant = null;
-    this.pendingAgentIds = new Set();  // Agent tool_use_id 추적 — 결과 전 user 텍스트 분류용
+    this.pendingAgentIds = new Set();
+    this._clearPending  = false;
+    this._slashPending  = false;  // 슬래시 커맨드 후 다음 assistant → ec_system
+    this._postCompact   = false;
+    this._compactTurn   = null;
   }
 
   feedLine(line) {
@@ -84,6 +89,7 @@ class StreamParser {
   }
 
   _handle(evt) {
+    this._curLex = classify(evt);
     switch (evt.type) {
       case 'system':           return this._onSystem(evt);
       case 'user':             return this._onUser(evt);
@@ -109,11 +115,21 @@ class StreamParser {
         this.h.onSystem && this.h.onSystem(this.session);
         return;
       case 'compact_boundary':
-        this.h.onCompactBoundary && this.h.onCompactBoundary(evt);
+        // type:'compact_boundary'로 직접 오는 경우도 처리 (버전별 차이 대비)
+        this._onSystem({ ...evt, subtype: 'compact_boundary' });
         return;
       case 'session_id_change':
+        if (evt.new_session_id) {
+          this.session.id = evt.new_session_id;
+          this.h.onSessionIdChange && this.h.onSessionIdChange(evt.new_session_id, evt);
+        }
+        // /clear 후 session_id_change → 클리어 완료 확정
+        if (this._clearPending) {
+          this._clearPending = false;
+          this._addTurn({ type: 'ec_system', subtype: 'clear_complete', body: '대화 내역이 초기화됐습니다.' });
+        }
+        return;
       case 'usage_alert':
-        // 세션 lifecycle 이벤트 — 흡수
         return;
       case 'queue-operation':
       case 'last-prompt':
@@ -129,7 +145,104 @@ class StreamParser {
   }
 
   _onSystem(evt) {
-    if (evt.subtype === 'init') {
+    const sub = evt.subtype;
+
+    // ── 압축 상태 기계 ─────────────────────────────────────────────────────
+    if (sub === 'compact_boundary') {
+      const meta = evt.compactMetadata || evt.compact_metadata || {};
+      if (this._compactTurn) {
+        // 라이브: "압축 중..." → "압축 완료"로 mutate
+        this._compactTurn.subtype     = 'compact_complete';
+        this._compactTurn.body        = '대화가 압축됐습니다.';
+        this._compactTurn.compactMeta = meta;
+        this._compactTurn = null;
+        this.h.onTurnUpdate && this.h.onTurnUpdate();
+      } else {
+        // 재생(jsonl): compact_boundary 먼저 옴 → 새 ec_system 생성
+        const ct = { type: 'ec_system', subtype: 'compact_complete', body: '대화가 압축됐습니다.', details: [], compactMeta: meta };
+        this._addTurn(ct);
+        this._compactTurn = ct; // post-compact context의 details 누적용
+      }
+      this._postCompact = true;
+      return;
+    }
+
+    if (sub === 'status') {
+      const status = evt.status;
+      const result = evt.compact_result;
+
+      if (status === 'compacting' && !this._compactTurn) {
+        // 압축 시작 — "압축 중..." 턴 생성
+        const ct = { type: 'ec_system', subtype: 'compacting', body: '압축 중...', details: [] };
+        this._compactTurn = ct;
+        this._addTurn(ct);
+      } else if (result === 'failed') {
+        // 압축 취소/실패
+        const err = evt.compact_error || '압축 실패';
+        if (this._compactTurn) {
+          this._compactTurn.subtype = 'compact_canceled';
+          this._compactTurn.body    = `압축이 취소됐습니다.`;
+          this._compactTurn.error   = err;
+          this._compactTurn = null;
+          this.h.onTurnUpdate && this.h.onTurnUpdate();
+        } else {
+          this._addTurn({ type: 'ec_system', subtype: 'compact_canceled', body: '압축이 취소됐습니다.', error: err });
+        }
+      }
+      // result === 'success'는 compact_boundary가 뒤따름 — 거기서 처리
+      this.h.onStatus && this.h.onStatus(status, evt);
+      return;
+    }
+
+    // ── local_command ─────────────────────────────────────────────────────
+    if (sub === 'local_command') {
+      const content = evt.content || '';
+
+      // /clear 닫는 괄호 (빈 stdout)
+      if (this._clearPending) {
+        this._clearPending = false;
+        this._addTurn({ type: 'ec_system', subtype: 'clear_complete', body: '대화 내역이 초기화됐습니다.', newSessionId: this.session.id });
+        return;
+      }
+
+      // stdout 결과 — /help 등 슬래시 커맨드 응답
+      const stdoutM = content.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/);
+      if (stdoutM) {
+        const result = stdoutM[1].trim();
+        if (result) this._addTurn({ type: 'ec_system', subtype: 'slash_result', body: result });
+        return;
+      }
+
+      // stderr 결과 — 취소/에러
+      const stderrM = content.match(/<local-command-stderr>([\s\S]*?)<\/local-command-stderr>/);
+      if (stderrM) {
+        const result = stderrM[1].trim();
+        if (result) this._addTurn({ type: 'ec_system', subtype: 'slash_result', body: result });
+        return;
+      }
+
+      // 커맨드 자체 — /help, /model 등 → pill 표시 + pending 확인용 meta
+      if (/^\/\w/.test(content.trim())) {
+        this._addTurn({ type: 'meta', body: content.trim(), eventType: 'slash_cmd' });
+        this._slashPending = false; // user turn 기반 감지 취소
+      }
+      return;
+    }
+
+    if (sub === 'session_id_change' || evt.new_session_id) {
+      if (evt.new_session_id) {
+        this.session.id = evt.new_session_id;
+        this.h.onSessionIdChange && this.h.onSessionIdChange(evt.new_session_id, evt);
+      }
+      if (this._clearPending) {
+        this._clearPending = false;
+        this._addTurn({ type: 'ec_system', subtype: 'clear_complete', body: '대화 내역이 초기화됐습니다.', newSessionId: evt.new_session_id });
+      }
+      return;
+    }
+
+    // ── 세션 메타 ──────────────────────────────────────────────────────────
+    if (sub === 'init') {
       this.session.id = evt.session_id || this.session.id;
       this.session.model = evt.model || this.session.model;
       this.session.cwd = evt.cwd || this.session.cwd;
@@ -141,17 +254,18 @@ class StreamParser {
       this.session.claudeCodeVersion = evt.claude_code_version || null;
       this.session.permissionMode = evt.permissionMode || null;
       this.h.onSystem && this.h.onSystem(this.session);
-      return;
-    }
-    if (evt.subtype === 'status') {
-      // 단순 'requesting' 등 heartbeat — turn 미생성, callback만
-      this.h.onStatus && this.h.onStatus(evt.status, evt);
     }
   }
 
   _onUser(evt) {
     const msg = evt.message;
     if (!msg) return;
+    // isMeta: true — claude code가 직접 meta로 표시한 이벤트 (caveat 등)
+    if (evt.isMeta) {
+      const raw = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+      this._addTurn({ type: 'meta', body: raw, eventType: 'client_meta', ts: evt.timestamp || null, uuid: evt.uuid || null });
+      return;
+    }
     const contents = Array.isArray(msg.content)
       ? msg.content
       : [{ type: 'text', text: String(msg.content || '') }];
@@ -166,9 +280,53 @@ class StreamParser {
           this._addTurn({ type: 'ec_system', body: ecSysMatch[1].trim(), ts, uuid });
           continue;
         }
-        // /clear 명령 감지 — 다음 빈 assistant 응답을 ec_system으로 대체
-        if (/^\/clear\s*$/.test(text.trim())) {
+        // /compact 커맨드 — meta로 숨김
+        if (/^\/compact\s*$/.test(text.trim()) || /<command-name>\/compact<\/command-name>/i.test(text)) {
+          this._addTurn({ type: 'meta', body: text, eventType: 'compact_cmd', ts, uuid });
+          continue;
+        }
+        // 기타 슬래시 커맨드 (/help, /model 등) — meta + 다음 assistant 응답을 ec_system으로
+        if (/^\/\w/.test(text.trim())) {
+          this._slashPending = true;
+          this._addTurn({ type: 'meta', body: text, eventType: 'slash_cmd', ts, uuid });
+          continue;
+        }
+        // ! bash 단축 — meta로 숨김 (서버가 backtick으로 변환해 echo됨)
+        if (/^!\s/.test(text.trim())) {
+          this._addTurn({ type: 'meta', body: text, eventType: 'bash_cmd', ts, uuid });
+          continue;
+        }
+        // <local-command-caveat> — 항상 meta (clear/compact 전후 자동 주입되는 래퍼)
+        if (/<local-command-caveat>/i.test(text)) {
+          this._addTurn({ type: 'meta', body: text, eventType: 'local_cmd_caveat', ts, uuid });
+          continue;
+        }
+        // <local-command-stdout> — 항상 meta
+        if (/<local-command-stdout>/i.test(text)) {
+          this._addTurn({ type: 'meta', body: text, eventType: 'local_cmd_stdout', ts, uuid });
+          continue;
+        }
+        // "Continue from where you left off." — 구형 ec-system inject 잔재 → meta
+        if (/^Continue from where you left off\./i.test(text.trim())) {
+          this._addTurn({ type: 'meta', body: text, eventType: 'legacy_ec_inject', ts, uuid });
+          continue;
+        }
+        // post-compact context — compact_boundary 이후 user 턴 숨김
+        // 첫 번째 user 턴("This session is being continued...")은 details에 포함
+        if (this._postCompact) {
+          const isSummary = /^This session is being continued/i.test(text.trim());
+          this._addTurn({ type: 'meta', body: text, eventType: 'compact_context', ts, uuid });
+          if (isSummary && this._compactTurn) {
+            this._compactTurn.details.push(text);
+            this.h.onTurnUpdate && this.h.onTurnUpdate();
+          }
+          continue;
+        }
+        // /clear 감지 — 평문 또는 <command-name>/clear</command-name> 형식
+        if (/^\/clear\s*$/.test(text.trim()) || /<command-name>\/clear<\/command-name>/i.test(text)) {
           this._clearPending = true;
+          this._addTurn({ type: 'meta', body: text, eventType: 'clear_cmd', ts, uuid });
+          continue;
         }
         const channel = parseChannelEnvelope(text);
         if (channel) {
@@ -209,19 +367,44 @@ class StreamParser {
     const msg = evt.message;
     if (!msg) return;
     // msg.usage = 이 API 호출의 실제 input 크기 (누적 아님, 컴팩션 반영됨)
+    // cache_creation은 제외 — 새로 캐시 쓰는 양이라 컨텍스트 창 사용량에 포함하면 100% 초과 오산됨
     if (msg.usage) {
       const u = msg.usage;
-      const rawCtx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      const rawCtx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0);
       if (rawCtx > 0) this.session.lastCtxInput = rawCtx;
     }
     const contents = Array.isArray(msg.content) ? msg.content : [];
     const ts = evt.timestamp || null;
     const uuid = evt.uuid || null;
-    // /clear 후 빈 assistant 응답 → ec_system "클리어 완료"로 대체
     const hasText = contents.some(c => c.type === 'text' && c.text);
+    // 슬래시 커맨드 직후 assistant 응답 → ec_system으로 전환 (결과/에러 메시지)
+    if (this._slashPending) {
+      this._slashPending = false;
+      if (hasText) {
+        const body = contents.filter(c => c.type === 'text').map(c => c.text).join('');
+        this._addTurn({ type: 'ec_system', subtype: 'slash_result', body, ts, uuid });
+        if (msg.usage) this._updateUsage(msg.usage);
+        return;
+      }
+    }
+    // post-compact 중 "No response requested." → meta, 계속 _postCompact 유지
+    // 그 외 실제 assistant 응답 → post-compact 종료
+    if (this._postCompact) {
+      const firstText = contents.find(c => c.type === 'text')?.text || '';
+      if (!firstText || /^No response requested\.?$/i.test(firstText.trim())) {
+        this._addTurn({ type: 'meta', body: firstText, eventType: 'compact_no_resp', ts, uuid });
+        this._postCompact = false;
+        this._compactTurn = null;
+        if (msg.usage) this._updateUsage(msg.usage);
+        return;
+      }
+      this._postCompact = false;
+      this._compactTurn = null;
+    }
+    // /clear 후 빈 assistant 응답 → ec_system "클리어 완료"로 대체
     if (!hasText && this._clearPending) {
       this._clearPending = false;
-      this._addTurn({ type: 'ec_system', body: '대화 내역이 초기화됐습니다.', ts, uuid });
+      this._addTurn({ type: 'ec_system', subtype: 'clear_complete', body: '대화 내역이 초기화됐습니다.', ts, uuid });
       if (msg.usage) this._updateUsage(msg.usage);
       return;
     }
@@ -332,6 +515,7 @@ class StreamParser {
   }
 
   _addTurn(turn) {
+    if (this._curLex && !turn.lex) turn.lex = this._curLex;
     this.turns.push(turn);
     this.h.onTurn && this.h.onTurn(turn, this.turns);
   }

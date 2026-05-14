@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EC environment variable schema",
+  "description": "EC가 spawn하는 Claude 세션에 주입할 환경변수의 정적 목록. UI는 이 목록을 표 형태로 렌더, 사용자는 값만 편집 가능.",
+  "vars": [
+    {
+      "key": "CLAUDE_STREAM_IDLE_TIMEOUT_MS",
+      "default": "0",
+      "type": "integer",
+      "description": "스트림 idle 타임아웃(ms). 0=무한. CC 기본 300000(5분).",
+      "userEditable": true
+    },
+    {
+      "key": "CLAUDE_ENABLE_BYTE_WATCHDOG",
+      "default": "1",
+      "type": "boolean",
+      "description": "바이트 레벨 스트림 watchdog 활성화.",
+      "userEditable": true
+    },
+    {
+      "key": "CLAUDE_ENABLE_STREAM_WATCHDOG",
+      "default": "1",
+      "type": "boolean",
+      "description": "이벤트 레벨 스트림 watchdog 활성화.",
+      "userEditable": true
+    },
+    {
+      "key": "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+      "default": "1",
+      "type": "boolean",
+      "description": "CC가 터미널 타이틀을 변경하지 않게 함 (EC 자체 세션명 사용).",
+      "userEditable": true
+    },
+    {
+      "key": "CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS",
+      "default": "",
+      "placeholder": "100000 (EC 권장)",
+      "type": "integer",
+      "description": "파일 읽기 최대 출력 토큰. 비워두면 CC 기본값. 큰 파일 분할 방지에 100000 권장.",
+      "userEditable": true
+    },
+    {
+      "key": "MAX_MCP_OUTPUT_TOKENS",
+      "default": "",
+      "placeholder": "100000 (IOA 권장)",
+      "type": "integer",
+      "description": "MCP 도구 출력 최대 토큰. CC 기본 25000. IOA 긴 메시지 대비 100000 권장.",
+      "userEditable": true
+    },
+    {
+      "key": "MCP_CONNECT_TIMEOUT_MS",
+      "default": "",
+      "placeholder": "10000 (IOA 권장)",
+      "type": "integer",
+      "description": "MCP 서버 연결 타임아웃(ms). CC 기본 5000. IOA 연결 안정성 위해 10000 권장.",
+      "userEditable": true
+    },
+    {
+      "key": "CLAUDE_CODE_TMPDIR",
+      "default": "",
+      "placeholder": "${ecHome}/tmp (자동)",
+      "type": "string",
+      "description": "Claude Code 임시파일 디렉토리. 비워두면 ~/.easyclaude/tmp 자동 사용.",
+      "userEditable": true
+    },
+    {
+      "key": "DO_NOT_TRACK",
+      "default": "0",
+      "type": "boolean",
+      "description": "Anthropic 원격 분석 차단 (자체 OTEL은 별개).",
+      "userEditable": true
+    }
+  ]
+}
