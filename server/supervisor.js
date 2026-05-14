@@ -32,6 +32,69 @@ if (!MGMT_SOCK) { console.error('usage: supervisor.js <mgmt-sock> [pid-file]'); 
 const sessions  = new Map(); // sid → session object
 const mgmtConns = new Set(); // 활성 관리 연결
 
+// ── 플러그인 시스템 ───────────────────────────────────────────────────────────
+const PLUGINS_DIR = path.join(__dirname, '..', 'plugins');
+const STATE_FILE  = path.join(process.env.HOME || '/tmp', '.easyclaude', 'state.json');
+let plugins = [];
+
+function loadState() {
+  try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return {}; }
+}
+function saveState(state) {
+  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); } catch {}
+}
+
+// EC API — 플러그인에 제공하는 인터페이스
+const supApi = {
+  get sessionState() { return _sessionState; },
+  saveState(state) { _sessionState = state; saveState(state); },
+  sendUserText(ch, text) {
+    if (!ch || !ch.proc) return;
+    const line = JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text }] },
+    }) + '\n';
+    try { ch.proc.stdin.write(line); } catch {}
+  },
+};
+let _sessionState = loadState();
+
+function loadPlugins() {
+  // 기존 플러그인 정리
+  for (const p of plugins) { try { if (p.onUnload) p.onUnload(); } catch {} }
+  plugins = [];
+  // require 캐시 제거 후 재로드
+  if (!fs.existsSync(PLUGINS_DIR)) return;
+  for (const f of fs.readdirSync(PLUGINS_DIR).filter(f => f.endsWith('.js'))) {
+    const fpath = path.join(PLUGINS_DIR, f);
+    try {
+      delete require.cache[require.resolve(fpath)];
+      const p = require(fpath);
+      plugins.push(p);
+      if (p.onLoad) p.onLoad(supApi);
+      console.log(`[supervisor:plugin] loaded: ${f}`);
+    } catch (e) { console.error(`[supervisor:plugin] load fail ${f}: ${e.message}`); }
+  }
+}
+
+function pluginOnSessionSpawn(sid) {
+  const s = sessions.get(sid);
+  if (!s) return;
+  const ch = s.ch;
+  const sess = { id: sid, cwd: s.cwd, home: s.home };
+  for (const p of plugins) { try { if (p.onSessionSpawn) p.onSessionSpawn(ch, sess); } catch {} }
+}
+function pluginOnStdoutLine(sid, line) {
+  const s = sessions.get(sid);
+  if (!s) return;
+  for (const p of plugins) { try { if (p.onStdoutLine) p.onStdoutLine(s.ch, line); } catch {} }
+}
+function pluginOnSessionExit(sid) {
+  const s = sessions.get(sid);
+  if (!s) return;
+  for (const p of plugins) { try { if (p.onSessionExit) p.onSessionExit(s.ch); } catch {} }
+}
+
 // ── 세션 생성/제거 ────────────────────────────────────────────────────────────
 const SUP_LOG = process.env.HOME ? process.env.HOME + '/tmp/supervisor-events.log' : '/tmp/supervisor-events.log';
 function supLog(msg) { try { require('fs').appendFileSync(SUP_LOG, `${msg} ts=${Date.now()}\n`); } catch {} }
@@ -69,6 +132,10 @@ function createSession(sid, sockPath, pidPath, cwd, args, env) {
   const MAX_BUF = 2000;
   const conns   = new Set();
 
+  // 플러그인용 ch 객체 — EC server의 ch와 동일 인터페이스
+  const home = env.HOME || process.env.HOME || null;
+  const ch = { proc, sess: { id: sid, cwd, home }, alive: true, signedInAs: null, inboxStop: null, _lastEventTs: null };
+
   function broadcastSession(obj) {
     const line = JSON.stringify(obj) + '\n';
     for (const c of conns) try { c.write(line); } catch {}
@@ -78,10 +145,19 @@ function createSession(sid, sockPath, pidPath, cwd, args, env) {
     for (const c of mgmtConns) try { c.write(line); } catch {}
   }
 
+  let stdoutLineBuf = '';
   proc.stdout.on('data', d => {
     buffer.push({ op: 'stdout', data: d });
     while (buffer.length > MAX_BUF) buffer.shift();
     broadcastSession({ op: 'stdout', data: d });
+    // 플러그인 onStdoutLine 호출
+    stdoutLineBuf += d;
+    let nl;
+    while ((nl = stdoutLineBuf.indexOf('\n')) >= 0) {
+      const line = stdoutLineBuf.slice(0, nl);
+      stdoutLineBuf = stdoutLineBuf.slice(nl + 1);
+      if (line.trim()) pluginOnStdoutLine(sid, line);
+    }
   });
   proc.stderr.on('data', d => {
     buffer.push({ op: 'stderr', data: d });
@@ -91,11 +167,14 @@ function createSession(sid, sockPath, pidPath, cwd, args, env) {
     if (s) console.error(`[supervisor:${sid}:stderr] ${s.slice(0, 400)}`);
   });
   proc.on('exit', (code, signal) => {
+    ch.alive = false;
     console.log(`[supervisor:${sid}] exited code=${code} signal=${signal} pid=${proc.pid}`);
     broadcastSession({ op: 'exit', code, signal });
     broadcastMgmt({ op: 'exited', sid, code, signal });
+    pluginOnSessionExit(sid);
   });
   proc.on('error', err => {
+    ch.alive = false;
     console.error(`[supervisor:${sid}] spawn error: ${err.message}`);
     broadcastSession({ op: 'exit', code: -1, signal: null, error: err.message });
     broadcastMgmt({ op: 'exited', sid, code: -1, signal: null, error: err.message });
@@ -151,7 +230,9 @@ function createSession(sid, sockPath, pidPath, cwd, args, env) {
   });
   server.on('error', err => console.error(`[supervisor:${sid}] socket error: ${err.message}`));
 
-  sessions.set(sid, { proc, server, sockPath, pidPath });
+  sessions.set(sid, { proc, server, sockPath, pidPath, cwd, ch });
+  // 플러그인 onSessionSpawn
+  setTimeout(() => pluginOnSessionSpawn(sid), 200);
   return proc.pid;
 }
 
@@ -209,6 +290,13 @@ const mgmtServer = net.createServer(conn => {
           sid, pid: s.proc.pid, alive: s.proc.exitCode === null,
         }));
         try { conn.write(JSON.stringify({ op: 'sessions', list }) + '\n'); } catch {}
+      } else if (msg.op === 'reload-plugins') {
+        loadPlugins();
+        // 리로드 후 살아있는 세션에 onSessionSpawn 재호출
+        for (const [sid, s] of sessions) {
+          if (s.proc.exitCode === null) setTimeout(() => pluginOnSessionSpawn(sid), 100);
+        }
+        try { conn.write(JSON.stringify({ op: 'plugins-reloaded', count: plugins.length }) + '\n'); } catch {}
       }
     }
   });
@@ -219,6 +307,8 @@ const mgmtServer = net.createServer(conn => {
 mgmtServer.listen(MGMT_SOCK, () => {
   try { fs.chmodSync(MGMT_SOCK, 0o600); } catch {}
   console.log(`[supervisor] started pid=${process.pid} mgmt=${MGMT_SOCK}`);
+  // 시동 시 플러그인 로드
+  setTimeout(loadPlugins, 300);
 });
 mgmtServer.on('error', err => {
   console.error('[supervisor] mgmt error:', err.message);
