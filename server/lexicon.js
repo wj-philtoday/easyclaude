@@ -66,10 +66,11 @@ function classify(evt) {
     const msg = evt.message || {};
     const content = msg.content;
     if (Array.isArray(content) && content.length > 0) {
+      // 하나라도 tool_use_id 있으면 tool_result (순서 무관하게 검사)
+      if (content.some(c => c && typeof c === 'object' && 'tool_use_id' in c))
+        return { css: 'hidden', category: 'tool_result_response' };
       const inner = content[0];
       if (inner && typeof inner === 'object') {
-        // tool_result 응답 — assistant turn에 fold 처리됨
-        if ('tool_use_id' in inner) return { css: 'hidden', category: 'tool_result_response' };
         if ('text' in inner) return { css: '.ec-turn-human', category: 'user_text' };
         return { css: '.ec-turn-human', category: 'user_block' };
       }

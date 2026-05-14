@@ -367,9 +367,10 @@ class StreamParser {
     const msg = evt.message;
     if (!msg) return;
     // msg.usage = 이 API 호출의 실제 input 크기 (누적 아님, 컴팩션 반영됨)
+    // cache_creation은 제외 — 새로 캐시 쓰는 양이라 컨텍스트 창 사용량에 포함하면 100% 초과 오산됨
     if (msg.usage) {
       const u = msg.usage;
-      const rawCtx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      const rawCtx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0);
       if (rawCtx > 0) this.session.lastCtxInput = rawCtx;
     }
     const contents = Array.isArray(msg.content) ? msg.content : [];

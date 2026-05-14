@@ -30,6 +30,7 @@
     <div id="ec-viewbar" class="ec-viewbar">
       <div class="ec-viewbar-left">
         <button id="ec-restart-btn" class="ec-vb-btn ec-hidden" title="세션 재기동 (재기동)" aria-label="세션 재기동">↻</button>
+        <button id="ec-disconnect-btn" class="ec-vb-btn ec-hidden" title="연결 끊기" aria-label="연결 끊기">✕</button>
       </div>
       <div class="ec-viewbar-center">
         <span id="ec-active-label" class="ec-active-label"></span>
@@ -417,8 +418,8 @@
       </section>
 
       <section class="ec-settings-section">
-        <h4>ec 환경 (Claude HOME)</h4>
-        <small class="ec-field-hint">ec는 단일 자체 HOME(overlay)으로 claude를 spawn합니다. 인증·settings.json·credentials는 모두 이 한 곳에 저장됩니다.</small>
+        <h4>인증 / Claude 계정</h4>
+        <small class="ec-field-hint">ec는 <code>~/.easyclaude/</code>를 Claude 설정 디렉토리(CLAUDE_CONFIG_DIR)로 사용합니다. 인증·settings.json·credentials는 모두 여기에 저장됩니다.</small>
         <div id="cfg-homes-list" class="ec-homes-list" style="margin-top:8px">
           <div class="ec-empty">로드 중…</div>
         </div>
@@ -448,6 +449,23 @@
           <span style="flex:1;margin-bottom:0">메타/훅 이벤트를 대화창에 표시</span>
         </label>
         <small class="ec-field-hint">기본 OFF. 메타데이터·hook 이벤트가 noise일 때 끄세요.</small>
+      </section>
+
+      <section class="ec-settings-section">
+        <h4>환경변수</h4>
+        <small class="ec-field-hint">EC가 spawn하는 Claude 세션에 주입되는 환경변수. 새 세션부터 적용됩니다.</small>
+        <div id="ec-env-list" class="ec-env-list"></div>
+        <div class="ec-env-extra">
+          <div class="ec-env-extra-head">
+            <span>추가 env 파일 참조 (KEY=VALUE 형식)</span>
+            <button type="button" id="ec-env-extra-add" class="ec-btn">+ 추가</button>
+          </div>
+          <div id="ec-env-extra-list"></div>
+        </div>
+        <div class="ec-settings-actions" style="margin-top:10px">
+          <button type="button" id="ec-env-save" class="ec-btn ec-btn-primary">저장</button>
+          <button type="button" id="ec-env-reload" class="ec-btn">불러오기</button>
+        </div>
       </section>
 
       <section class="ec-settings-section">
@@ -535,19 +553,6 @@
     <div class="ec-dialog-body">
       <!-- 일반 (스니펫) -->
       <section class="ec-settings-section">
-        <h4>ec 환경 (HOME overlay)</h4>
-        <label class="ec-field" style="flex-direction:row;align-items:center;gap:10px">
-          <input type="checkbox" id="ece-overlay-enabled" style="width:auto">
-          <span style="flex:1;margin-bottom:0">ec 자체 HOME 사용 (권장, 기본 ON)</span>
-        </label>
-        <small class="ec-field-hint">끄면 사용자 real HOME(~/) 사용. ec 첫 실행이거나 claude 설정 격리가 필요하면 ON.</small>
-        <label class="ec-field" style="flex-direction:row;align-items:center;gap:10px;margin-top:8px">
-          <input type="checkbox" id="ece-claudemd-user-ref" style="width:auto">
-          <span style="flex:1;margin-bottom:0">overlay CLAUDE.md에 사용자 ~/.claude/CLAUDE.md @-참조 포함</span>
-        </label>
-      </section>
-
-      <section class="ec-settings-section">
         <h4>응답 포맷 강제</h4>
         <label class="ec-field" style="flex-direction:row;align-items:center;gap:10px">
           <input type="checkbox" id="ece-fmt-markdown" style="width:auto">
@@ -607,7 +612,22 @@ window.MathJax = {
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
 
-<script src="renderer.js?v=1778700000"></script>
-<script src="app.js?v=1778700000"></script>
+<script src="renderer.js?v=1778760000"></script>
+
+<!-- 모듈: 부모 → sub → app. X(Y) := X.Y namespace 패턴 -->
+<script src="modules/core.js?v=9"></script>
+<script src="modules/core.system.js?v=9"></script>
+<script src="modules/core.header.js?v=9"></script>
+<script src="modules/core.sidebar.js?v=9"></script>
+<script src="modules/chat.js?v=9"></script>
+<script src="modules/chat.message.js?v=9"></script>
+<script src="modules/chat.input.js?v=9"></script>
+<script src="modules/chat.info.js?v=9"></script>
+<script src="modules/modal.js?v=9"></script>
+<script src="modules/modal.core.js?v=9"></script>
+<script src="modules/modal.chat.js?v=9"></script>
+<script src="modules/modal.config.js?v=9"></script>
+
+<script src="app.js?v=9"></script>
 </body>
 </html>

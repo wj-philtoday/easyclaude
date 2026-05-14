@@ -30,11 +30,13 @@ function makeBatchedEventHandler(selfIoaId, sendFn, dataDir) {
   let buf = [], timer = null;
   function flush() {
     if (!buf.length) return;
-    const events = buf.splice(0);
-    timer = null;
-    // 마지막 처리 timestamp 저장
-    const lastTs = events.map(e => e.ts).filter(Boolean).sort().pop();
+    // bs.restarted 등 무시할 시스템 이벤트는 필터 (timestamp는 처리 기록 위해 유지)
+    const rawEvents = buf.splice(0);
+    const lastTs = rawEvents.map(e => e.ts).filter(Boolean).sort().pop();
     if (lastTs && dataDir) writeProcessedTs(dataDir, lastTs);
+    timer = null;
+    const events = rawEvents.filter(e => e.type !== 'bs.restarted');
+    if (!events.length) return;
     let text;
     if (events.length === 1) {
       text = eventToChannelText(events[0], selfIoaId);
@@ -45,19 +47,54 @@ function makeBatchedEventHandler(selfIoaId, sendFn, dataDir) {
       const titles = events.map(e=>`• ${e.title||e.type||'(알림)'}`).join('\n');
       text = `<channel source="ioa" ioa_id="${selfIoaId}" from="${selfIoaId}" type="batch">\n알림 ${events.length}건 (${summary}):\n${titles}\n</channel>`;
     }
+    if (!text) return;
     console.log(`[inbox-watcher] inject: ${selfIoaId} ${events.length}건`);
     sendFn(text);
   }
   return function handleEvent(event) {
+    // 임시 raw watcher 로그
+    try { require('fs').appendFileSync(`/tmp/watcher-${selfIoaId.replace(/@.*/,'')}.log`, `[RAW] ${JSON.stringify(event)}\n`); } catch {}
     buf.push(event);
     if (timer) clearTimeout(timer);
     timer = setTimeout(flush, BATCH_DELAY_MS);
   };
 }
 
-function startWatcher(dataDir, onEvent) {
+function startWatcher(dataDir, lastEventTs, onEvent) {
   const watchers = new Map();   // filename → fs.FSWatcher
   const positions = new Map();  // filename → byte offset
+
+  // ── startup catch-up: lastEventTs 이후 이벤트 replay ─────────────────
+  if (lastEventTs) {
+    try {
+      const now = new Date();
+      // 이번 달 + 지난 달 파일 모두 확인
+      const filesToCheck = [
+        currentEventsFilename(now),
+        currentEventsFilename(new Date(now.getFullYear(), now.getMonth() - 1, 1)),
+      ];
+      const missed = [];
+      for (const fname of filesToCheck) {
+        const fp = path.join(dataDir, fname);
+        if (!fs.existsSync(fp)) continue;
+        const lines = fs.readFileSync(fp, 'utf8').split('\n').filter(l => l.trim());
+        for (const line of lines) {
+          try {
+            const e = JSON.parse(line);
+            if (e.ts && e.ts > lastEventTs) missed.push(e);
+          } catch {}
+        }
+      }
+      if (missed.length > 0) {
+        console.log(`[inbox-watcher] catch-up ${missed.length} events since ${lastEventTs}`);
+        setTimeout(() => {
+          for (const e of missed) { try { onEvent(e); } catch {} }
+        }, 500);
+      }
+    } catch (e) {
+      console.warn('[inbox-watcher] catch-up fail:', e.message);
+    }
+  }
 
   function watchFile(filename) {
     if (watchers.has(filename)) return;
@@ -117,7 +154,9 @@ function startWatcher(dataDir, onEvent) {
 }
 
 // events.jsonl 한 줄(BS pushEvent로 append됨) → channel 봉투 텍스트
+// bs.restarted는 무한 idle timeout + stable session_id 조합으로 자동 복구되므로 주입 안 함.
 function eventToChannelText(event, selfIoaId) {
+  if (event.type === 'bs.restarted') return null;
   const from = event.from || selfIoaId;
   const channelType = event.source || 'ioa';
   const body = event.title || event.type || '';

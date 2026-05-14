@@ -7,12 +7,14 @@
 // ── 콘텐츠 추출 헬퍼 ─────────────────────────────────────────────────────────
 function extractUserText(evt) {
   const content = evt.message?.content;
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content) && content.length > 0) {
+  let text = '';
+  if (typeof content === 'string') text = content;
+  else if (Array.isArray(content) && content.length > 0) {
     const c = content[0];
-    if (c && typeof c === 'object') return c.text || '';
+    if (c && typeof c === 'object') text = c.text || '';
   }
-  return '';
+  // ec-hint는 에이전트용 — 유저에게 노출 안 함
+  return text.replace(/<ec-hint>[\s\S]*?<\/ec-hint>\n?/gi, '').trimStart();
 }
 
 function extractAssistantParts(evt) {
@@ -37,18 +39,14 @@ function extractChannelEnvelope(text) {
 }
 
 // ── 단일 이벤트 렌더 (그룹핑 없음) ──────────────────────────────────────────
-function renderSingleEvent(e) {
+function renderSingleEvent(e, foldIdx) {
   const { evt, lex } = e;
   const cat = lex.category;
   const css = lex.css.replace(/^\./g, '').replace(/\./g, ' ');
 
-  // EC 시스템 메시지들
+  // compact_boundary는 renderEventStream에서 그룹 처리 (여기는 fallback)
   if (cat.startsWith('compact_boundary')) {
-    const m = evt.compactMetadata || evt.compact_metadata || {};
-    const metaStr = m.preTokens != null
-      ? ` · ${m.trigger === 'auto' ? '자동' : '수동'} · ${m.preTokens.toLocaleString()} → ${m.postTokens.toLocaleString()} tokens${m.durationMs ? ` · ${(m.durationMs/1000).toFixed(0)}s` : ''}`
-      : '';
-    return `<div class="ec-turn-ec-system"><div class="ec-divider">대화가 압축됐습니다.${esc(metaStr)}</div></div>`;
+    return `<div class="ec-turn-ec-system"><div class="ec-divider">대화가 압축됐습니다.</div></div>`;
   }
   if (cat === 'compact_canceled') {
     return `<div class="ec-turn-ec-system"><div class="ec-divider ec-divider-warn">압축이 취소됐습니다.</div></div>`;
@@ -71,9 +69,14 @@ function renderSingleEvent(e) {
   // user_text
   if (cat === 'user_text' || cat === 'user_block') {
     const text = extractUserText(evt);
+    // task-notification, system-reminder 등 harness 내부 태그 — 숨김
+    if (/<task-notification>|<system-reminder>|<local-command-caveat>/.test(text)) return '';
     // ec-system inject
     const ecSys = text.match(/^<ec-system>([\s\S]*?)<\/ec-system>$/);
-    if (ecSys) return `<div class="ec-turn-ec-system">${esc(ecSys[1].trim())}</div>`;
+    if (ecSys) {
+      const body = ecSys[1].replace(/<ec-hint>[\s\S]*?<\/ec-hint>/gi, '').trim();
+      return `<div class="ec-turn-ec-system">${esc(body)}</div>`;
+    }
     // channel
     const ch = extractChannelEnvelope(text);
     if (ch) {
@@ -94,20 +97,22 @@ function renderSingleEvent(e) {
     const parts = extractAssistantParts(evt);
     const sessLabel = window.__activeSessLabel || 'Claude';
     let bodyHtml = '';
-    if (parts.thinking) {
-      bodyHtml += `<details class="ec-thinking-block"><summary style="font-size:11px;color:var(--muted);cursor:pointer">생각 보기</summary><div style="font-size:12px;color:var(--muted)">${ecRenderBody(parts.thinking)}</div></details>`;
-    }
+    // thinking fold는 어시스턴트 버블 밖에 따로 렌더링 (아래에서 반환)
+    const thinkingHtml = (parts.thinking && parts.thinking.trim())
+      ? `<details class="ec-thinking-fold" data-fold-i="${foldIdx ?? ''}"><summary class="ec-thinking-summary">생각 완료</summary><pre class="ec-code-thinking ec-fold-clickable">${esc(parts.thinking)}</pre></details>`
+      : '';
     if (parts.text) {
       bodyHtml += `<div>${ecRenderBody(parts.text)}</div>`;
     }
     if (parts.tools.length > 0 && !parts.text && !parts.thinking) {
       bodyHtml = `<div style="font-size:12px;color:var(--muted)">${esc(parts.tools.map(t => t.name).join(', '))} 호출 중…</div>`;
     }
-    if (!bodyHtml) return '';
-    return `<div class="ec-turn ec-turn-assistant">
+    if (!bodyHtml && !thinkingHtml) return '';
+    const assistHtml = bodyHtml ? `<div class="ec-turn ec-turn-assistant">
       <div class="ec-turn-label" style="color:${COLORS.assistant||'var(--green)'}">${esc(sessLabel)}</div>
       <div class="ec-turn-body assistant">${bodyHtml}</div>
-    </div>`;
+    </div>` : '';
+    return thinkingHtml + assistHtml;
   }
 
   // hook fold
@@ -123,8 +128,23 @@ function renderSingleEvent(e) {
   return '';
 }
 
+// tool_result_response에서 텍스트 추출
+function extractToolResultText(evt) {
+  const contents = evt.message?.content || [];
+  for (const c of contents) {
+    if (c.type === 'tool_result') {
+      const rc = c.content;
+      if (typeof rc === 'string') return rc;
+      if (Array.isArray(rc)) return rc.map(x => x.text || '').join('\n');
+    }
+    if (c.type === 'text') return c.text || '';
+  }
+  return '';
+}
+
 // ── 이벤트 스트림 렌더 (괄호 그룹핑 포함) ───────────────────────────────────
-function renderEventStream(events) {
+function renderEventStream(events, opts) {
+  opts = opts || {};
   let html = '';
   let i = 0;
 
@@ -144,7 +164,8 @@ function renderEventStream(events) {
           const stdoutM = nextContent.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/);
           const stderrM = nextContent.match(/<local-command-stderr>([\s\S]*?)<\/local-command-stderr>/);
           const result = (stdoutM || stderrM)?.[1]?.trim();
-          if (result) resultHtml = `<div class="ec-turn-ec-system ec-slash-result">${esc(result)}</div>`;
+          // /compact 결과 "Compacted"는 compact_boundary가 이미 표시하므로 숨김
+          if (result && !/^\/compact/i.test(cmd)) resultHtml = `<div class="ec-turn-ec-system ec-slash-result">${esc(result)}</div>`;
           i += 2;
         } else {
           i++;
@@ -156,50 +177,124 @@ function renderEventStream(events) {
       continue;
     }
 
-    // user_text with ! → bash 그룹
+    // user_text with ! → asst_tool_use로 통합 처리하므로 여기서 스킵
     if (cat === 'user_text') {
       const text = extractUserText(evt);
-      if (/^!\s/.test(text)) {
-        const related = [];
-        let j = i + 1;
-        while (j < events.length) {
-          const ne = events[j];
-          if (ne.lex.category === 'asst_tool_use') {
-            const tc = (ne.evt.message?.content || []).find(c => c.type === 'tool_use' && c.name === 'Bash');
-            if (tc) {
-              const output = (ne.evt.message?.content || []).find(c => c.type === 'tool_result')?.content;
-              related.push({ input: tc.input, output });
-              j++;
-              break;
-            }
-          }
-          if (['user_text', 'user_block', 'asst_text', 'asst_thinking+text'].includes(ne.lex.category)) break;
-          j++;
-        }
-        const outputHtml = related.map(r => {
-          const out = typeof r.output === 'string' ? r.output : JSON.stringify(r.output || '');
-          return out ? `<pre class="ec-bash-output">${esc(out)}</pre>` : '';
-        }).join('');
-        html += `<div class="ec-bash-group">
-          <div class="ec-cmd-pill ec-cmd-pill-bash">${esc(text)}</div>
-          ${outputHtml ? `<details class="ec-bash-details"><summary>출력 보기</summary>${outputHtml}</details>` : ''}
-        </div>`;
-        i = j;
-        continue;
-      }
+      if (/^!\s/.test(text)) { i++; continue; }
     }
 
-    // asst_tool_use → fold (비-bash 도구)
-    if (cat === 'asst_tool_use') {
-      const tools = (evt.message?.content || []).filter(c => c.type === 'tool_use');
-      const label = tools.map(t => t.name).join(', ');
-      const inner = renderSingleEvent(e);
-      html += `<details class="ec-turn-fold"><summary>▸ ${esc(label)}</summary>${inner}</details>`;
-      i++;
+    // tool_result_response — fold에서 소비 안 됐으면 스킵 (밖에 노출 방지)
+    if (cat === 'tool_result_response') { i++; continue; }
+
+    // thinking_complete synthetic 이벤트 → "생각 완료" fold
+    if (cat === 'thinking_complete') {
+      html += `<details class="ec-thinking-fold" data-fold-i="${i}"><summary class="ec-thinking-summary">생각 완료</summary><pre class="ec-code-thinking ec-fold-clickable">${esc(evt.thinking || '')}</pre></details>`;
+      i++; continue;
+    }
+    // asst_thinking: 마지막 것만 "생각 완료" fold로 렌더 (진행 중엔 스킵)
+    if (cat === 'asst_thinking') {
+      if (opts.turnComplete) {
+        const hasLater = events.slice(i + 1).some(e => e.lex.category === 'asst_thinking');
+        if (!hasLater) {
+          const parts = extractAssistantParts(evt);
+          if (parts.thinking && parts.thinking.trim()) {
+            html += `<details class="ec-thinking-fold" data-fold-i="${i}"><summary class="ec-thinking-summary">생각 완료</summary><pre class="ec-code-thinking ec-fold-clickable">${esc(parts.thinking)}</pre></details>`;
+          }
+        }
+      }
+      i++; continue;
+    }
+
+    // compact_boundary 브라켓: 이후 user_text(요약), meta, local_command 수집
+    if (cat.startsWith('compact_boundary')) {
+      const compactMeta = evt.compactMetadata || evt.compact_metadata || {};
+      const details = [];
+      let j = i + 1;
+      while (j < events.length) {
+        const ne = events[j];
+        const nc = ne.lex.category;
+        // 요약 텍스트 → details에 포함
+        if (nc === 'user_text') {
+          const t = extractUserText(ne.evt);
+          if (/^This session is being continued/i.test(t.trim())) {
+            details.push(t); j++; continue;
+          }
+          break; // 실제 사용자 메시지면 중단
+        }
+        // post-compact 메타(caveat, local_command 등) → 스킵
+        if (ne.lex.css === 'hidden' || nc === 'slash_cmd_result' || nc === 'user_meta') {
+          j++; continue;
+        }
+        break;
+      }
+      const metaStr = compactMeta.preTokens != null
+        ? ` · ${compactMeta.trigger === 'auto' ? '자동' : '수동'} · ${compactMeta.preTokens.toLocaleString()} → ${compactMeta.postTokens.toLocaleString()} tokens${compactMeta.durationMs ? ` · ${(compactMeta.durationMs/1000).toFixed(0)}s` : ''}`
+        : '';
+      const detailHtml = details.length
+        ? `<details class="ec-compact-details"><summary>요약 보기</summary><pre>${esc(details.join('\n\n'))}</pre></details>`
+        : '';
+      html += `<div class="ec-turn-ec-system"><div class="ec-divider">대화가 압축됐습니다.${esc(metaStr)}</div>${detailHtml}</div>`;
+      i = j;
       continue;
     }
 
-    html += renderSingleEvent(e);
+    // asst_tool_use → 연속된 tool_use 이벤트들을 하나의 fold로 그룹화
+    if (cat === 'asst_tool_use') {
+      // 연속 asst_tool_use 이벤트 수집
+      const toolGroups = [{ evt, lex }];
+      let j = i + 1;
+      while (j < events.length && events[j].lex.category === 'asst_tool_use') {
+        toolGroups.push(events[j]);
+        j++;
+      }
+      const allToolIds = new Set();
+      const LOOKAHEAD = 40;
+
+      // 각 그룹의 tool_use + result 수집 → 탭 UI
+      const toolTabId = `ec-tool-${i}`;
+      const groupHtml = toolGroups.map((g, gi) => {
+        const gtools = (g.evt.message?.content || []).filter(c => c.type === 'tool_use');
+        const gids = new Set(gtools.map(t => t.id).filter(Boolean));
+        gids.forEach(id => allToolIds.add(id));
+        const gLabel = gtools.map(t => t.name).join(', ');
+        const inputStr = gtools.map(t => {
+          const s = typeof t.input === 'string' ? t.input : JSON.stringify(t.input || {}, null, 2);
+          return s.slice(0, 1000);
+        }).join('\n');
+        let outputStr = '';
+        for (let k = j; k < events.length && k <= j + LOOKAHEAD; k++) {
+          const ne = events[k];
+          if (ne.lex.category === 'tool_result_response') {
+            const rid = ne.evt.message?.content?.[0]?.tool_use_id;
+            if (!gids.size || gids.has(rid)) { outputStr = extractToolResultText(ne.evt).slice(0, 3000); break; }
+          }
+          if (ne.lex.category.startsWith('asst_')) break;
+        }
+        const subId = toolGroups.length > 1 ? `${toolTabId}-${gi}` : toolTabId;
+        const tabPanel = `<div class="ec-tool-panel" id="${subId}">
+          <div class="ec-tool-content">
+            <pre class="ec-code-input ec-tool-pane active" data-pane="input">${esc(inputStr)}</pre>
+            <pre class="ec-code-output ec-tool-pane" data-pane="output">${outputStr ? esc(outputStr) : '<span style="color:var(--muted);font-size:11px">출력 없음</span>'}</pre>
+          </div>
+          <div class="ec-tool-tabs">
+            <button class="ec-tool-tab active" data-panel="${subId}" data-pane="input">입력</button>
+            <button class="ec-tool-tab" data-panel="${subId}" data-pane="output">출력</button>
+          </div>
+        </div>`;
+        if (toolGroups.length === 1) return tabPanel;
+        return `<div class="ec-tool-sub-label">${esc(gLabel)}</div>${tabPanel}`;
+      }).join('');
+
+      const outerLabel = toolGroups.length === 1
+        ? (toolGroups[0].evt.message?.content || []).filter(c => c.type === 'tool_use').map(t => t.name).join(', ')
+        : `툴 ${toolGroups.length}개`;
+
+      html += `<details class="ec-turn-fold" data-fold-i="${i}"><summary>▸ ${esc(outerLabel)}</summary>${groupHtml}</details>`;
+      i = j;
+      continue;
+    }
+
+    html += renderSingleEvent(e, i);
     i++;
   }
 
@@ -207,12 +302,14 @@ function renderEventStream(events) {
 }
 
 // ── pending 렌더 ─────────────────────────────────────────────────────────────
-function renderPendingInputs(pending) {
+function renderPendingInputs(pending, ch) {
+  const opaque = ch && ch.thinkingActive; // thinking 중이면 pending도 불투명
+  const cls = opaque ? '' : ' ec-pending';
   return pending.map(p => {
-    if (p.kind === 'slash') return `<div class="ec-cmd-pill ec-cmd-pill-slash ec-pending">${esc(p.text)}</div>`;
-    if (p.kind === 'bash')  return `<div class="ec-cmd-pill ec-cmd-pill-bash ec-pending">${esc(p.text)}</div>`;
+    if (p.kind === 'slash') return `<div class="ec-cmd-pill ec-cmd-pill-slash${cls}">${esc(p.text)}</div>`;
+    if (p.kind === 'bash')  return `<div class="ec-cmd-pill ec-cmd-pill-bash${cls}">${esc(p.text)}</div>`;
     const label = cfg?.userName || (T && T('user_default')) || 'User';
-    return `<div class="ec-turn ec-turn-human ec-pending">
+    return `<div class="ec-turn ec-turn-human${cls}">
       <div class="ec-turn-label" style="color:${COLORS?.human||'var(--blue)'}">${esc(label)}</div>
       <div class="ec-turn-body human">${esc(p.text)}</div>
     </div>`;
@@ -235,10 +332,16 @@ function confirmPendingInputs(ch) {
 // isWaiting 판단
 function isWaitingForResponse(ch, pending) {
   if (!ch.alive || pending.length > 0) return false;
+  if (ch.hadResult) return false; // result 수신됨 (인터럽트 포함) — 대기 해제
   const events = ch.events || [];
   if (!events.length) return false;
-  const last = events[events.length - 1];
-  return last && (last.lex.category === 'user_text' || last.lex.category === 'user_block');
+  // 마지막 실질 이벤트가 user turn이면 응답 대기 중
+  for (let i = events.length - 1; i >= 0; i--) {
+    const cat = events[i].lex.category;
+    if (cat === 'tool_result_response') continue; // hidden 이벤트 skip
+    return cat === 'user_text' || cat === 'user_block';
+  }
+  return false;
 }
 
 if (typeof module !== 'undefined') module.exports = { renderEventStream, renderPendingInputs, confirmPendingInputs, isWaitingForResponse, extractUserText };
