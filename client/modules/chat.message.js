@@ -104,7 +104,7 @@ chat.message.history.loadMore = async function(ch) {
   if (ch.histStart === 0) return;
   ch.histLoading = true;
   try {
-    const params = new URLSearchParams({ limit: '100' });
+    const params = new URLSearchParams({ limit: '500' });
     if (ch.histStart > 0) params.set('before', String(ch.histStart));
     const url = core.system.api.base() + `api/sessions/${encodeURIComponent(ch.sessionId)}/history-turns?` + params.toString();
     const r = await fetch(url);
@@ -380,7 +380,25 @@ chat.message.render = Object.assign(function() {
     renderUsage();
     return;
   }
-  const allEvents = [...(ch.histEvents || []), ...(ch.events || [])];
+  const histArr = ch.histEvents || [];
+  const liveArr = ch.events || [];
+  let liveStart = 0;
+  if (histArr.length > 0 && liveArr.length > 0) {
+    // histArr 끝에서 UUID를 역방향 탐색해 liveArr 교차점 이후(새 이벤트)만 붙임
+    outer: for (let i = histArr.length - 1; i >= 0; i--) {
+      const hUuid = histArr[i]?.evt?.uuid;
+      if (!hUuid) continue;
+      for (let j = liveArr.length - 1; j >= 0; j--) {
+        if (liveArr[j]?.evt?.uuid === hUuid) { liveStart = j + 1; break outer; }
+      }
+    }
+  } else if (histArr.length === 0 && liveArr.length > 0) {
+    // 히스토리 미로드 상태 — 버퍼에서 마지막 compact_boundary 이후만 표시해 플래시 방지
+    for (let i = liveArr.length - 1; i >= 0; i--) {
+      if (liveArr[i]?.lex?.category?.startsWith('compact_boundary')) { liveStart = i; break; }
+    }
+  }
+  const allEvents = [...histArr, ...liveArr.slice(liveStart)];
   const pending = ch.pendingInputs || [];
   if (!allEvents.length && !pending.length) {
     $parsed.innerHTML = '<div class="ec-empty">출력 대기 중…</div>';

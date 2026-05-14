@@ -587,6 +587,17 @@ function connectSupervisorMgmt(retries) {
           if (s.alive) supervisorAliveSids.add(s.sid);
         }
         console.log(`[easyclaude] supervisor sessions: ${msg.list?.length || 0} total, ${supervisorAliveSids.size} alive`);
+        // 재시작 후 alive 세션 자동 attach — 브라우저 open 없이 IOA watcher 즉시 가동
+        setTimeout(() => {
+          for (const s of (msg.list || [])) {
+            if (!s.alive) continue;
+            const sess = sessions().find(ss => ss.id === s.sid);
+            if (sess && !ptyChannels.has(s.sid)) {
+              console.log(`[easyclaude] auto-attach: ${s.sid}`);
+              spawnSession(sess);
+            }
+          }
+        }, 500); // supervisor 소켓 파일 준비 대기
       } else if (msg.op === 'exited') {
         // supervisor가 세션 종료를 관리 채널로 알림 (추가 처리 불필요 — 세션 소켓에서 처리됨)
         console.log(`[easyclaude] supervisor: session exited ${msg.sid} code=${msg.code}`);
@@ -2557,10 +2568,10 @@ function attachSupervisor(sess, ch, args, childEnv) {
             }, 300);
             return;
           }
-          // EC 재기동 시 MCP 연결 갱신 트리거 (idle timeout=0이므로 세션은 살아있음)
-          if (wasAlive) {
-            if (ch.alive) sendUserText(ch, '<ec-system><ec-hint>이 메시지는 MCP 연결 갱신을 위한 것입니다. 답장이나 반응은 필요하지 않습니다.</ec-hint></ec-system>');
-          }
+          // EC 재기동 알림 비활성 — 예상치 못한 컨텍스트 주입이 혼잣말 버그 유발 가능
+          // if (wasAlive) {
+          //   if (ch.alive) sendUserText(ch, '<ec-system><ec-hint>이 메시지는 MCP 연결 갱신을 위한 것입니다...</ec-hint></ec-system>');
+          // }
         }
         else if (msg.op === 'stdout') handleClaudeStdout(ch, msg.data);
         else if (msg.op === 'stderr') handleClaudeStderr(ch, msg.data);
@@ -3006,10 +3017,12 @@ wss.on('connection', ws => {
         saveState(sessionState);
       }
       const ch = ptyChannels.get(att.sessionId);
-      // 이미 alive이면 kill 없이 restarted만 응답 (open op으로 이미 spawn된 경우)
+      // alive 여부 무관하게 실제 재기동 — 기존 proc kill 후 respawn (새 env 적용)
       if (ch && ch.proc && ch.proc.exitCode === null) {
-        send({ op: 'restarted', id, claudeId: ch.claudeId, alive: true });
-        return;
+        ch._intentionalKill = true;
+        try { ch.proc.kill(); } catch {}
+        ch.proc = null;
+        ch.alive = false;
       }
       if (ch && ch.proc) {
         ch._intentionalKill = true;

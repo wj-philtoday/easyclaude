@@ -69,8 +69,9 @@ function renderSingleEvent(e, foldIdx) {
   // user_text
   if (cat === 'user_text' || cat === 'user_block') {
     const text = extractUserText(evt);
-    // task-notification, system-reminder 등 harness 내부 태그 — 숨김
-    if (/<task-notification>|<system-reminder>|<local-command-caveat>/.test(text)) return '';
+    // harness 내부 태그 및 compact 요약 — 숨김
+    if (/<task-notification>|<system-reminder>|<local-command-|<command-name>/.test(text)) return '';
+    if (/^This session is being continued from a previous conversation/.test(text)) return '';
     // ec-system inject
     const ecSys = text.match(/^<ec-system>([\s\S]*?)<\/ec-system>$/);
     if (ecSys) {
@@ -120,6 +121,9 @@ function renderSingleEvent(e, foldIdx) {
     const label = cat;
     return `<details class="ec-turn-fold"><summary>▸ ${esc(label)}</summary><pre>${esc(JSON.stringify(evt, null, 2))}</pre></details>`;
   }
+
+  // queued_command — 이미 처리된 대기 명령, 별도 표시 불필요
+  if (cat.startsWith('queued_command')) return '';
 
   // debug fallback
   if (showDebugEvents && showDebugEvents()) {
@@ -221,8 +225,8 @@ function renderEventStream(events, opts) {
           }
           break; // 실제 사용자 메시지면 중단
         }
-        // post-compact 메타(caveat, local_command 등) → 스킵
-        if (ne.lex.css === 'hidden' || nc === 'slash_cmd_result' || nc === 'user_meta') {
+        // post-compact 메타(caveat, local_command, queued_command 등) → 스킵
+        if (ne.lex.css === 'hidden' || nc === 'slash_cmd_result' || nc === 'user_meta' || nc.startsWith('queued_command')) {
           j++; continue;
         }
         break;
